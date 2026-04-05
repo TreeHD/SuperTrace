@@ -1,97 +1,78 @@
-This is a new [**React Native**](https://reactnative.dev) project, bootstrapped using [`@react-native-community/cli`](https://github.com/react-native-community/cli).
+# SuperTrace 🌐
 
-# Getting Started
+SuperTrace is a high-performance, cross-platform Android and iOS network diagnostic application built with React Native. It fundamentally abandons standard sequential node checking for **parallel concurrent tracing**, dramatically boosting trace speeds while plotting routes seamlessly to a live map view.
 
-> **Note**: Make sure you have completed the [Set Up Your Environment](https://reactnative.dev/docs/set-up-your-environment) guide before proceeding.
+## ✨ Key Features
 
-## Step 1: Start Metro
+- **Blazing Fast Concurrent Traceroute Engine**: A highly parallelized Kotlin (`TracerouteModule.kt`) and Swift (`TracerouteModule.swift`) bridge utilizing UDP TTL manipulation, allowing hops to be resolved in tandem without congesting the OS socket pools.
+- **Multi-IP DNS Load Balancer Resolving**: Directly taps into native OS DNS resolvers (`InetAddress.getAllByName` & iOS `CFHost`) to intercept multi-IP clustered domains, allowing manual endpoint tracing.
+- **Hardcore ICMP Ping Logging**: Simulates Linux-like ICMP Ping Output Terminal styles using raw sub-processes (`Runtime.getRuntime().exec("ping")`) and UDP Unreachable mechanisms, entirely bypassing Java's flawed `isReachable()` APIs.
+- **Geospatial Offline Mapping**: Avoids third-party Geocoding API rate limits by mapping IPInfo's `Alpha-2` country codes locally offline to pure O(1) coordinates, rendering visually aesthetic node jumps on a React Native WebView map.
+- **Search History State**: Zero-hassle caching utilizing `@react-native-async-storage/async-storage` allowing seamless selection of previously traced IP endpoints.
 
-First, you will need to run **Metro**, the JavaScript build tool for React Native.
+---
 
-To start the Metro dev server, run the following command from the root of your React Native project:
+## 💻 Development Guide
 
-```sh
-# Using npm
-npm start
+Because SuperTrace relies **heavily** on deeply nested custom Native Modules (Kotlin / Swift), you cannot just rely on Expo Go or standard Metro Hot Reloading when core network functions change.
 
-# OR using Yarn
-yarn start
+### Prerequisites
+- Node.js `^22.11.0`
+- React Native CLI
+- Android Studio (for Android builds via Gradle)
+- Xcode (for iOS builds via CocoaPods)
+
+### 1. Install Dependencies
+```bash
+# Install node packages
+npm install
+
+# Install iOS CocoaPods
+cd ios && pod install && cd ..
 ```
 
-## Step 2: Build and run your app
+### 2. Run the Development Server & App
+Always make sure you re-compile the app natively when changing Kotlin or Swift code:
 
-With Metro running, open a new terminal window/pane from the root of your React Native project, and use one of the following commands to build and run your Android or iOS app:
-
-### Android
-
-```sh
-# Using npm
-npm run android
-
-# OR using Yarn
-yarn android
+**For Android:**
+```bash
+npx react-native run-android
+```
+**For iOS:**
+```bash
+npx react-native run-ios
 ```
 
-### iOS
+> **Note**: For JS/TS changes inside `/src`, the Metro Bundler's fast refresh feature (`r`) works perfectly. You only need to rebuild using the commands above when making native system changes.
 
-For iOS, remember to install CocoaPods dependencies (this only needs to be run on first clone or after updating native deps).
+---
 
-The first time you create a new project, run the Ruby bundler to install CocoaPods itself:
+## 🚀 Building for Release (Production)
 
-```sh
-bundle install
+### Android Build
+Android requires a generated keystore file. Configure your `android/app/build.gradle` `signingConfigs` block with your release keystore before proceeding.
+
+1. **Generate APK**:
+```bash
+cd android
+./gradlew assembleRelease
+# Output located at: android/app/build/outputs/apk/release/app-release.apk
 ```
 
-Then, and every time you update your native dependencies, run:
-
-```sh
-bundle exec pod install
+2. **Generate AAB (Android App Bundle for Play Store)**:
+```bash
+cd android
+./gradlew bundleRelease
+# Output located at: android/app/build/outputs/bundle/release/app-release.aab
 ```
 
-For more information, please visit [CocoaPods Getting Started guide](https://guides.cocoapods.org/using/getting-started.html).
+### iOS Build
 
-```sh
-# Using npm
-npm run ios
-
-# OR using Yarn
-yarn ios
+1. Open the `.xcworkspace` file located inside the `ios/` directory using Xcode.
+```bash
+open ios/SuperTrace.xcworkspace
 ```
-
-If everything is set up correctly, you should see your new app running in the Android Emulator, iOS Simulator, or your connected device.
-
-This is one way to run your app — you can also build it directly from Android Studio or Xcode.
-
-## Step 3: Modify your app
-
-Now that you have successfully run the app, let's make changes!
-
-Open `App.tsx` in your text editor of choice and make some changes. When you save, your app will automatically update and reflect these changes — this is powered by [Fast Refresh](https://reactnative.dev/docs/fast-refresh).
-
-When you want to forcefully reload, for example to reset the state of your app, you can perform a full reload:
-
-- **Android**: Press the <kbd>R</kbd> key twice or select **"Reload"** from the **Dev Menu**, accessed via <kbd>Ctrl</kbd> + <kbd>M</kbd> (Windows/Linux) or <kbd>Cmd ⌘</kbd> + <kbd>M</kbd> (macOS).
-- **iOS**: Press <kbd>R</kbd> in iOS Simulator.
-
-## Congratulations! :tada:
-
-You've successfully run and modified your React Native App. :partying_face:
-
-### Now what?
-
-- If you want to add this new React Native code to an existing application, check out the [Integration guide](https://reactnative.dev/docs/integration-with-existing-apps).
-- If you're curious to learn more about React Native, check out the [docs](https://reactnative.dev/docs/getting-started).
-
-# Troubleshooting
-
-If you're having issues getting the above steps to work, see the [Troubleshooting](https://reactnative.dev/docs/troubleshooting) page.
-
-# Learn More
-
-To learn more about React Native, take a look at the following resources:
-
-- [React Native Website](https://reactnative.dev) - learn more about React Native.
-- [Getting Started](https://reactnative.dev/docs/environment-setup) - an **overview** of React Native and how setup your environment.
-- [Learn the Basics](https://reactnative.dev/docs/getting-started) - a **guided tour** of the React Native **basics**.
-- [Blog](https://reactnative.dev/blog) - read the latest official React Native **Blog** posts.
-- [`@facebook/react-native`](https://github.com/facebook/react-native) - the Open Source; GitHub **repository** for React Native.
+2. Navigate to **Product -> Scheme -> Edit Scheme** and ensure the build configuration is set to **Release**.
+3. Select **Any iOS Device (arm64)** from the target device dropdown at the top.
+4. Click **Product -> Archive** to begin the packaging process.
+5. Once complete, the **Xcode Organizer** will open, allowing you to `Distribute App` directly to TestFlight or configure a standalone `ipa` file for enterprise deployment.
