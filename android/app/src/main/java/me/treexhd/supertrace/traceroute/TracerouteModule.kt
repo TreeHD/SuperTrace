@@ -132,69 +132,87 @@ class TracerouteModule(reactContext: ReactApplicationContext) :
                 var minRtt = Double.MAX_VALUE
                 var maxRtt = 0.0
 
+                android.util.Log.d("SuperTrace", "pingHost: Starting $count probes to $host")
+
                 for (seq in 1..count) {
                     if (!isActive) break
 
-                    val result = WritableNativeMap()
+                    val result = Arguments.createMap()
                     result.putInt("seq", seq)
                     result.putString("ip", targetAddress.hostAddress)
 
-                    try {
-                        val startTime = System.nanoTime()
-                        
-                        // Use native ping command instead of isReachable which requires root for ICMP
-                        val process = Runtime.getRuntime().exec(
-                            arrayOf("ping", "-c", "1", "-W", 
-                                (timeoutMs / 1000).coerceAtLeast(1).toString(),
-                                targetAddress.hostAddress)
-                        )
-                        
-                        val output = process.inputStream.bufferedReader().readText()
-                        process.waitFor()
-                        
-                        val endTime = System.nanoTime()
-                        val rtt = (endTime - startTime) / 1_000_000.0
-                        
-                        val timePattern = Regex("""time[=<]\s*([\d.]+)\s*ms""")
-                        val timeMatch = timePattern.find(output)
+                    var rttValue: Double? = null
+                    var outputString = ""
 
-                        if (process.exitValue() == 0 && timeMatch != null) {
-                            val parsedRtt = timeMatch.groupValues[1].toDoubleOrNull() ?: rtt
-                            result.putDouble("rtt", parsedRtt)
-                            received++
-                            totalRtt += parsedRtt
-                            if (parsedRtt < minRtt) minRtt = parsedRtt
-                            if (parsedRtt > maxRtt) maxRtt = parsedRtt
-                        } else {
-                            result.putNull("rtt")
-                            result.putString("error", "timeout")
+                    try {
+                        withTimeout(timeoutMs.toLong() + 2000) {
+                            val startTime = System.nanoTime()
+                            
+                            val commandPool = listOf(
+                                arrayOf("ping", "-c", "1", "-W", "1", targetAddress.hostAddress),
+                                arrayOf("/system/bin/ping", "-c", "1", "-W", "2", targetAddress.hostAddress),
+                                arrayOf("ping", "-c", "1", "-w", "1", targetAddress.hostAddress)
+                            )
+
+                            for (cmd in commandPool) {
+                                try {
+                                    val proc = ProcessBuilder(*cmd).redirectErrorStream(true).start()
+                                    val out = proc.inputStream.bufferedReader().readText()
+                                    proc.waitFor()
+                                    
+                                    val match = Regex("""time[=<]\s*([\d.]+)""").find(out)
+                                    if (match != null) {
+                                        rttValue = match.groupValues[1].toDoubleOrNull()
+                                        outputString = out
+                                        if (rttValue != null) break
+                                    }
+                                } catch (e: Exception) {
+                                    outputString = "Error: ${e.message}"
+                                }
+                            }
+                            
+                            // Fallback to isReachable
+                            if (rttValue == null) {
+                                android.util.Log.d("SuperTrace", "Native ping failed, using isReachable")
+                                if (targetAddress.isReachable(1000)) {
+                                    rttValue = (System.nanoTime() - startTime) / 1_000_000.0
+                                    outputString = "isReachable fallback"
+                                }
+                            }
                         }
                     } catch (e: Exception) {
+                        outputString = "Probe failed: ${e.message}"
+                    }
+
+                    val finalRtt = rttValue
+                    if (finalRtt != null && finalRtt > 0.0) {
+                        result.putDouble("rtt", finalRtt)
+                        received++
+                        totalRtt += finalRtt
+                        if (finalRtt < minRtt) minRtt = finalRtt
+                        if (finalRtt > maxRtt) maxRtt = finalRtt
+                    } else {
                         result.putNull("rtt")
-                        result.putString("error", e.message)
+                        result.putString("error", outputString.take(100))
                     }
 
                     results.pushMap(result)
-
-                    // Small delay between pings
-                    if (seq < count) {
-                        delay(200)
-                    }
+                    if (seq < count) delay(300)
                 }
 
-                val summary = WritableNativeMap()
+                val summary = Arguments.createMap()
                 summary.putInt("sent", count)
                 summary.putInt("received", received)
                 summary.putInt("lost", count - received)
-                summary.putDouble("lossPercent", if (count > 0) ((count - received).toDouble() / count * 100) else 0.0)
-                summary.putDouble("minRtt", if (minRtt == Double.MAX_VALUE) 0.0 else minRtt)
+                summary.putDouble("lossPercent", (count - received).toDouble() / count * 100.0)
+                summary.putDouble("minRtt", if (received > 0) minRtt else 0.0)
                 summary.putDouble("avgRtt", if (received > 0) totalRtt / received else 0.0)
                 summary.putDouble("maxRtt", maxRtt)
                 summary.putArray("results", results)
 
                 promise.resolve(summary)
             } catch (e: Exception) {
-                promise.reject("PING_ERROR", "Ping failed: ${e.message}")
+                promise.reject("PING_ERROR", e.message)
             }
         }
     }

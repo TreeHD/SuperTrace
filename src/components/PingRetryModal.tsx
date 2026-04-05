@@ -1,17 +1,17 @@
-import React, {useState} from 'react';
+import React, { useState } from 'react';
 import {
   View,
   Text,
   Modal,
   TouchableOpacity,
   StyleSheet,
-  FlatList,
+  ScrollView,
   ActivityIndicator,
 } from 'react-native';
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
-import {Colors, Spacing, BorderRadius, FontSize, FontFamily, Shadow} from '../theme';
-import {pingHost} from '../services/tracerouteService';
-import type {PingSummary, PingResult} from '../types';
+import { Colors, Spacing, BorderRadius, FontSize, FontFamily, Shadow } from '../theme';
+import { pingHost } from '../services/tracerouteService';
+import type { PingSummary, PingResult } from '../types';
 
 interface PingRetryModalProps {
   visible: boolean;
@@ -34,54 +34,69 @@ export default function PingRetryModal({
     setPinging(true);
     isPingingRef.current = true;
     setError(null);
-    
+    setSummary(null);
+
     let received = 0;
     let totalRtt = 0;
     let minRtt = Infinity;
     let maxRtt = 0;
     const currentResults: PingResult[] = [];
 
-    setSummary({
-      sent: 0, received: 0, lost: 0, lossPercent: 0,
-      minRtt: 0, avgRtt: 0, maxRtt: 0, results: []
-    });
+    const syncSummary = (sentCount: number) => {
+      setSummary({
+        sent: sentCount,
+        received,
+        lost: sentCount > 0 ? sentCount - received : 0,
+        lossPercent: sentCount > 0 ? ((sentCount - received) / sentCount) * 100 : 0,
+        minRtt: minRtt === Infinity ? 0 : minRtt,
+        avgRtt: received > 0 ? totalRtt / received : 0,
+        maxRtt,
+        results: [...currentResults],
+      });
+    };
 
     try {
+      console.log('UI: Starting ping sequence for', ip);
+      
       for (let i = 1; i <= count; i++) {
         if (!isPingingRef.current) break;
 
         const singleResult = await pingHost(ip, 1, 3000);
-        const hit = singleResult.results[0];
-        hit.seq = i; // Override the sequential index to reflect our loop
-        
-        currentResults.push(hit);
-        
-        if (hit.rtt !== null) {
-          received++;
-          totalRtt += hit.rtt;
-          if (hit.rtt < minRtt) minRtt = hit.rtt;
-          if (hit.rtt > maxRtt) maxRtt = hit.rtt;
+        console.log('UI Data Received:', singleResult);
+
+        if (singleResult && singleResult.results && singleResult.results.length > 0) {
+          const hit = singleResult.results[0];
+          console.log(`UI Debug: Processing packet seq=${i}, RTT=${hit.rtt} (${typeof hit.rtt})`);
+          
+          // Clone results to avoid reference issues
+          const resultEntry: PingResult = {
+            seq: i,
+            ip: hit.ip || ip,
+            rtt: typeof hit.rtt === 'number' ? hit.rtt : null,
+            error: hit.error
+          };
+          
+          currentResults.push(resultEntry);
+          
+          if (typeof resultEntry.rtt === 'number') {
+            received++;
+            totalRtt += resultEntry.rtt;
+            if (resultEntry.rtt < minRtt) minRtt = resultEntry.rtt;
+            if (resultEntry.rtt > maxRtt) maxRtt = resultEntry.rtt;
+          }
+        } else {
+          currentResults.push({ seq: i, ip, rtt: null, error: 'TIMEOUT' });
         }
 
-        setSummary({
-          sent: i,
-          received,
-          lost: i - received,
-          lossPercent: ((i - received) / i) * 100,
-          minRtt: minRtt === Infinity ? 0 : minRtt,
-          avgRtt: received > 0 ? totalRtt / received : 0,
-          maxRtt,
-          results: [...currentResults] 
-        });
+        syncSummary(i);
 
         if (i < count && isPingingRef.current) {
-          await new Promise<void>(resolve => setTimeout(() => resolve(), 200));
+          await new Promise<void>(resolve => setTimeout(resolve, 300));
         }
       }
     } catch (e: any) {
-      if (currentResults.length === 0) {
-        setError(e.message || 'Ping failed');
-      }
+      console.error('UI ERROR:', e);
+      setError(e.message || 'Ping failed');
     } finally {
       setPinging(false);
       isPingingRef.current = false;
@@ -171,8 +186,7 @@ export default function PingRetryModal({
           <TouchableOpacity
             style={[styles.startButton, pinging && styles.startButtonDisabled]}
             onPress={handlePing}
-            disabled={pinging}
-            activeOpacity={0.7}>
+            disabled={pinging}>
             {pinging ? (
               <>
                 <ActivityIndicator size="small" color={Colors.white} />
@@ -194,102 +208,82 @@ export default function PingRetryModal({
             </View>
           )}
 
-          {/* Results */}
-          {summary && (
-            <View style={styles.resultsSection}>
-              <View style={styles.divider} />
-
-              {/* Summary stats */}
-              <View style={styles.statsRow}>
-                <StatBadge
-                  label="Sent"
-                  value={`${summary.sent}`}
-                  color={Colors.text}
-                />
-                <StatBadge
-                  label="Received"
-                  value={`${summary.received}`}
-                  color={Colors.success}
-                />
-                <StatBadge
-                  label="Lost"
-                  value={`${summary.lost}`}
-                  color={Colors.error}
-                />
-                <StatBadge
-                  label="Loss %"
-                  value={`${summary.lossPercent.toFixed(1)}%`}
-                  color={
-                    summary.lossPercent === 0
-                      ? Colors.success
-                      : summary.lossPercent < 50
-                      ? Colors.warning
-                      : Colors.error
-                  }
-                />
-              </View>
-
-              {/* RTT stats */}
-              <View style={styles.rttStatsRow}>
-                <View style={styles.rttStatItem}>
-                  <Text style={styles.rttStatLabel}>Min</Text>
-                  <Text style={[styles.rttStatValue, {color: Colors.success}]}>
-                    {summary.minRtt.toFixed(1)} ms
-                  </Text>
+          {/* Results Section - Now Always Rendered for Stability */}
+          <View style={styles.resultsSection}>
+            <View style={styles.divider} />
+            
+            {summary ? (
+              <View style={{ flex: 1 }}>
+                <View style={styles.statsRow}>
+                  <View style={{ position: 'absolute', top: -14, left: Spacing.xxl }}>
+                     <Text style={{ color: Colors.accent, fontSize: 10, fontWeight: '700' }}>[RESULTS READY]</Text>
+                  </View>
+                  <StatBadge label="Sent" value={`${summary.sent}`} color={Colors.text} />
+                  <StatBadge label="Online" value={`${summary.received}`} color={Colors.success} />
+                  <StatBadge label="Loss" value={`${summary.lossPercent.toFixed(0)}%`} 
+                    color={summary.lossPercent > 0 ? Colors.error : Colors.success} />
                 </View>
-                <View style={styles.rttStatItem}>
-                  <Text style={styles.rttStatLabel}>Avg</Text>
-                  <Text style={[styles.rttStatValue, {color: Colors.accent}]}>
-                    {summary.avgRtt.toFixed(1)} ms
-                  </Text>
-                </View>
-                <View style={styles.rttStatItem}>
-                  <Text style={styles.rttStatLabel}>Max</Text>
-                  <Text style={[styles.rttStatValue, {color: Colors.warning}]}>
-                    {summary.maxRtt.toFixed(1)} ms
-                  </Text>
-                </View>
-              </View>
 
-              {/* Individual results terminal */}
-              <View style={styles.terminalContainer}>
-                <FlatList
-                  data={summary.results}
-                  keyExtractor={item => `${item.seq}`}
-                  style={styles.resultsList}
-                  renderItem={({item}) => {
-                    const isTimeout = item.rtt === null;
-                    return (
-                      <Text style={[styles.terminalText, isTimeout && styles.terminalTimeout]}>
-                        {isTimeout
-                          ? `Request timeout for icmp_seq ${item.seq}`
-                          : `64 bytes from ${ip}: icmp_seq=${item.seq} time=${item.rtt?.toFixed(1)} ms`}
-                      </Text>
-                    );
-                  }}
-                />
+                {/* RTT Summary */}
+                <View style={styles.rttStatsRow}>
+                  <View style={styles.rttStatItem}>
+                     <Text style={styles.rttStatLabel}>Min / Avg / Max RTT (ms)</Text>
+                     <Text style={[styles.rttStatValue, { color: Colors.accent, fontSize: FontSize.md }]}>
+                       {summary.minRtt.toFixed(1)} / {summary.avgRtt.toFixed(1)} / {summary.maxRtt.toFixed(1)}
+                     </Text>
+                  </View>
+                </View>
+
+                <ScrollView 
+                  style={styles.resultsScroll}
+                  contentContainerStyle={styles.resultsScrollContent}>
+                  {summary.results.map((item, index) => (
+                    <View key={`${item.seq}-${index}`} style={styles.pingCard}>
+                      <View style={styles.cardHeader}>
+                        <Text style={styles.seqText}>Seq #{item.seq}</Text>
+                        <Text style={[styles.statusText, { color: typeof item.rtt === 'number' ? Colors.success : Colors.error }]}>
+                          {typeof item.rtt === 'number' ? 'REPLY' : 'TIMEOUT'}
+                        </Text>
+                      </View>
+                      <View style={styles.cardBody}>
+                        {typeof item.rtt === 'number' ? (
+                          <Text style={styles.rttText}>{item.rtt.toFixed(2)} ms</Text>
+                        ) : (
+                          <Text style={styles.cardErrorText}>Request Timeout</Text>
+                        )}
+                        <Text style={styles.ipText}>{ip}</Text>
+                      </View>
+                    </View>
+                  ))}
+                  <View style={{ paddingVertical: Spacing.xl }}>
+                     <Text style={{ color: 'magenta', fontSize: 10, textAlign: 'center', opacity: 0.6 }}>[ END OF DATA ]</Text>
+                  </View>
+                </ScrollView>
               </View>
-            </View>
-          )}
+            ) : (
+              <View style={styles.placeholderContainer}>
+                {pinging ? (
+                  <View style={{ alignItems: 'center' }}>
+                    <ActivityIndicator size="small" color={Colors.accent} />
+                    <Text style={[styles.placeholderText, { marginTop: 10 }]}>Waiting for native response...</Text>
+                  </View>
+                ) : (
+                  <Text style={styles.placeholderText}>Hit START to begin diagnostic test</Text>
+                )}
+              </View>
+            )}
+          </View>
         </View>
       </View>
     </Modal>
   );
 }
 
-function StatBadge({
-  label,
-  value,
-  color,
-}: {
-  label: string;
-  value: string;
-  color: string;
-}) {
+function StatBadge({ label, value, color }: { label: string; value: string; color: string; }) {
   return (
     <View style={styles.statBadge}>
       <Text style={styles.statLabel}>{label}</Text>
-      <Text style={[styles.statValue, {color}]}>{value}</Text>
+      <Text style={[styles.statValue, { color }]}>{value}</Text>
     </View>
   );
 }
@@ -302,13 +296,13 @@ const styles = StyleSheet.create({
   },
   modal: {
     backgroundColor: Colors.surface,
-    borderTopLeftRadius: BorderRadius.xl,
-    borderTopRightRadius: BorderRadius.xl,
+    borderRadius: BorderRadius.xl,
     borderWidth: 1,
-    borderBottomWidth: 0,
     borderColor: Colors.surfaceBorder,
-    maxHeight: '85%',
-    paddingBottom: Spacing.xxl,
+    height: 720, // PULLED UP HIGHER
+    marginHorizontal: Spacing.sm,
+    marginBottom: Spacing.md, // FLOATING EFFECT
+    paddingBottom: Spacing.xl,
     ...Shadow.modal,
   },
   header: {
@@ -420,8 +414,7 @@ const styles = StyleSheet.create({
   },
   startButtonDisabled: {
     backgroundColor: Colors.surfaceLight,
-    shadowOpacity: 0,
-    elevation: 0,
+    opacity: 0.7,
   },
   startText: {
     color: Colors.white,
@@ -446,7 +439,19 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   resultsSection: {
+    flex: 1, // Let it fill the 720px modal
+    marginTop: Spacing.sm,
+  },
+  placeholderContainer: {
     flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingBottom: 100,
+  },
+  placeholderText: {
+    color: Colors.textMuted,
+    fontSize: FontSize.sm,
+    fontStyle: 'italic',
   },
   statsRow: {
     flexDirection: 'row',
@@ -481,7 +486,7 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: Colors.background,
     borderRadius: BorderRadius.sm,
-    padding: Spacing.md,
+    padding: Spacing.sm,
     alignItems: 'center',
   },
   rttStatLabel: {
@@ -494,25 +499,54 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     fontFamily: FontFamily.mono,
   },
-  terminalContainer: {
-    marginHorizontal: Spacing.xxl,
-    backgroundColor: '#0D0D0D',
-    padding: Spacing.md,
+  resultsScroll: {
+    flex: 1,
+    marginTop: Spacing.sm,
+  },
+  resultsScrollContent: {
+    paddingHorizontal: Spacing.xxl,
+    paddingBottom: Spacing.xl,
+  },
+  pingCard: {
+    backgroundColor: Colors.surfaceLight,
     borderRadius: BorderRadius.md,
-    borderWidth: 1,
-    borderColor: '#333',
-    maxHeight: 200,
+    padding: Spacing.md,
+    marginBottom: Spacing.sm,
+    borderWidth: 2,
+    borderColor: Colors.accent, // BRIGHT CYAN
   },
-  resultsList: {
-    flexGrow: 0,
+  cardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: Spacing.xs,
   },
-  terminalText: {
-    color: '#00FF41',
+  seqText: {
+    color: Colors.textSecondary,
+    fontSize: FontSize.xs,
+    fontWeight: '600',
+  },
+  statusText: {
+    fontSize: FontSize.xs,
+    fontWeight: '700',
+  },
+  cardBody: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'baseline',
+  },
+  rttText: {
+    color: Colors.white,
+    fontSize: FontSize.xl,
+    fontWeight: '700',
+  },
+  ipText: {
+    color: Colors.textMuted,
     fontSize: FontSize.xs,
     fontFamily: FontFamily.mono,
-    lineHeight: 18,
   },
-  terminalTimeout: {
-    color: '#FF4136',
+  cardErrorText: {
+    color: Colors.error,
+    fontSize: FontSize.sm,
+    fontWeight: '600',
   },
 });

@@ -324,13 +324,54 @@ class TracerouteModule: RCTEventEmitter {
     }
 
     private func simplePing(host: String, timeoutMs: Int) async -> (Bool, Double) {
-        // Rather than test TCP port 80, we use UDP ping (traceroute protocol) with a high TTL
-        // to solicit an ICMP Port Unreachable message from the final host, which serves as a ping.
+        // Use the same traceHop logic that works for traceroute
+        // If a server responds to traceroute, it will respond to this.
         let (_, rtt) = await traceHop(target: host, ttl: 64, timeoutMs: timeoutMs)
+        
         if let r = rtt {
             return (true, r)
         }
-        return (false, 0.0)
+        
+        // Final fallback: try port 80 check if UDP fails
+        // some networks allow HTTP but block high UDP ports
+        let connectSuccess = await tcpCheck(host: host, timeoutMs: timeoutMs)
+        return (connectSuccess, 0.0)
+    }
+
+    private func tcpCheck(host: String, timeoutMs: Int) async -> Bool {
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                guard let hostEntry = gethostbyname(host) else {
+                    continuation.resume(returning: false)
+                    return
+                }
+
+                var addr = sockaddr_in()
+                addr.sin_family = sa_family_t(AF_INET)
+                addr.sin_port = UInt16(80).bigEndian
+                memcpy(&addr.sin_addr, hostEntry.pointee.h_addr_list[0],
+                       Int(hostEntry.pointee.h_length))
+
+                let sock = socket(AF_INET, SOCK_STREAM, 0)
+                guard sock >= 0 else {
+                    continuation.resume(returning: false)
+                    return
+                }
+                defer { close(sock) }
+
+                var timeout = timeval()
+                timeout.tv_sec = __darwin_time_t(timeoutMs / 1000)
+                timeout.tv_usec = Int32((timeoutMs % 1000) * 1000)
+                setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+
+                let connectResult = withUnsafePointer(to: &addr) { ptr in
+                    ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                        connect(sock, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+                    }
+                }
+                continuation.resume(returning: connectResult == 0)
+            }
+        }
     }
 
     private func sendError(_ message: String) {
