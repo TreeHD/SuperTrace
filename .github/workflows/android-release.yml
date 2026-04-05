@@ -6,6 +6,9 @@ on:
       - 'v*' # 當您推送到 tag 如 v1.0.0 時觸發自動發布
   workflow_dispatch: # 您也可以在 GitHub UI 手動啟動編譯
 
+permissions:
+  contents: write # 關鍵修復：允許建立 Release 並上傳檔案
+
 jobs:
   build:
     runs-on: ubuntu-latest
