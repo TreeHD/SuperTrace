@@ -1,6 +1,6 @@
 # SuperTrace 🌐
 
-SuperTrace is a high-performance, cross-platform Android and iOS network diagnostic application built with React Native. It fundamentally abandons standard sequential node checking for **parallel concurrent tracing**, dramatically boosting trace speeds while plotting routes seamlessly to a live map view.
+SuperTrace is a high-performance, cross-platform Android and iOS network diagnostic application built with React Native. It fundamentally abandons standard sequential node checking for **parallel concurrent tracing**, dramatically boosting trace speeds while plotting routes seamlessly to a live map view. 
 
 ## ✨ Key Features
 
