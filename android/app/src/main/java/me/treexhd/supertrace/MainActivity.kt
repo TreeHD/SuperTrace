@@ -1,4 +1,4 @@
-package com.supertrace
+package me.treexhd.supertrace
 
 import com.facebook.react.ReactActivity
 import com.facebook.react.ReactActivityDelegate

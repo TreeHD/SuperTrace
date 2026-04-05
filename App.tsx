@@ -1,45 +1,55 @@
 /**
- * Sample React Native App
- * https://github.com/facebook/react-native
- *
- * @format
+ * SuperTrace - Network Traceroute & Diagnostics App
+ * Built with React Native 0.84 (New Architecture)
  */
 
-import { NewAppScreen } from '@react-native/new-app-screen';
-import { StatusBar, StyleSheet, useColorScheme, View } from 'react-native';
-import {
-  SafeAreaProvider,
-  useSafeAreaInsets,
-} from 'react-native-safe-area-context';
+import React from 'react';
+import {StatusBar} from 'react-native';
+import {SafeAreaProvider} from 'react-native-safe-area-context';
+import {NavigationContainer} from '@react-navigation/native';
+import {createNativeStackNavigator} from '@react-navigation/native-stack';
+import TracerouteScreen from './src/screens/TracerouteScreen';
+import {Colors} from './src/theme';
+
+const Stack = createNativeStackNavigator();
 
 function App() {
-  const isDarkMode = useColorScheme() === 'dark';
-
   return (
     <SafeAreaProvider>
-      <StatusBar barStyle={isDarkMode ? 'light-content' : 'dark-content'} />
-      <AppContent />
+      <StatusBar
+        barStyle="light-content"
+        backgroundColor={Colors.background}
+        translucent={false}
+      />
+      <NavigationContainer
+        theme={{
+          dark: true,
+          colors: {
+            primary: Colors.primary,
+            background: Colors.background,
+            card: Colors.surface,
+            text: Colors.text,
+            border: Colors.surfaceBorder,
+            notification: Colors.accent,
+          },
+          fonts: {
+            regular: {fontFamily: 'System', fontWeight: '400'},
+            medium: {fontFamily: 'System', fontWeight: '500'},
+            bold: {fontFamily: 'System', fontWeight: '700'},
+            heavy: {fontFamily: 'System', fontWeight: '800'},
+          },
+        }}>
+        <Stack.Navigator
+          screenOptions={{
+            headerShown: false,
+            contentStyle: {backgroundColor: Colors.background},
+            animation: 'fade',
+          }}>
+          <Stack.Screen name="Traceroute" component={TracerouteScreen} />
+        </Stack.Navigator>
+      </NavigationContainer>
     </SafeAreaProvider>
   );
 }
-
-function AppContent() {
-  const safeAreaInsets = useSafeAreaInsets();
-
-  return (
-    <View style={styles.container}>
-      <NewAppScreen
-        templateFileName="App.tsx"
-        safeAreaInsets={safeAreaInsets}
-      />
-    </View>
-  );
-}
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-  },
-});
 
 export default App;
