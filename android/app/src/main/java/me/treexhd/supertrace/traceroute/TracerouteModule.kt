@@ -300,7 +300,7 @@ class TracerouteModule(reactContext: ReactApplicationContext) :
                     val timeMatch = timePattern.find(output)
 
                     if (fromMatch != null) {
-                        hopIp = fromMatch.groupValues[1]
+                        hopIp = fromMatch.groupValues[1].removeSuffix(":")
                         val parsedRtt = timeMatch?.groupValues?.get(1)?.toDoubleOrNull() ?: rtt
                         rttValues.add(parsedRtt)
                     } else {
