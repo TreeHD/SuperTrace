@@ -1,5 +1,11 @@
 package me.treexhd.supertrace.traceroute
 
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.LinkProperties
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.os.Build
 import com.facebook.react.bridge.*
 import com.facebook.react.modules.core.DeviceEventManagerModule
 import kotlinx.coroutines.*
@@ -101,6 +107,84 @@ class TracerouteModule(reactContext: ReactApplicationContext) :
     fun stopTraceroute() {
         tracerouteJob?.cancel()
         tracerouteJob = null
+    }
+
+    /**
+     * Returns the DNS servers handed out by the OS for the *currently active*
+     * network. On modern Android this hits ConnectivityManager.getLinkProperties,
+     * which honours per-network resolvers (so cellular and WiFi report different
+     * answers when both are up). Includes Private DNS (DoT) hostname when set.
+     */
+    @ReactMethod
+    fun getSystemDnsServers(promise: Promise) {
+        scope.launch {
+            try {
+                val cm = reactApplicationContext.getSystemService(Context.CONNECTIVITY_SERVICE)
+                    as? ConnectivityManager
+                if (cm == null) {
+                    promise.resolve(buildDnsResult(emptyList(), null, "unknown", false))
+                    return@launch
+                }
+
+                val network: Network? = cm.activeNetwork
+                if (network == null) {
+                    promise.resolve(buildDnsResult(emptyList(), null, "none", false))
+                    return@launch
+                }
+
+                val props: LinkProperties? = cm.getLinkProperties(network)
+                val caps: NetworkCapabilities? = cm.getNetworkCapabilities(network)
+
+                val transport = when {
+                    caps == null -> "unknown"
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) -> "vpn"
+                    else -> "other"
+                }
+
+                val servers = props?.dnsServers
+                    ?.mapNotNull { it.hostAddress }
+                    ?.distinct()
+                    ?: emptyList()
+
+                // Private DNS (DoT) was added in API 28. Best-effort surface it.
+                var privateDnsServer: String? = null
+                var privateDnsActive = false
+                if (props != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    privateDnsActive = props.isPrivateDnsActive
+                    privateDnsServer = props.privateDnsServerName
+                }
+
+                promise.resolve(
+                    buildDnsResult(servers, privateDnsServer, transport, privateDnsActive)
+                )
+            } catch (e: Exception) {
+                android.util.Log.w("SuperTrace", "getSystemDnsServers failed: ${e.message}")
+                promise.resolve(buildDnsResult(emptyList(), null, "unknown", false))
+            }
+        }
+    }
+
+    private fun buildDnsResult(
+        servers: List<String>,
+        privateDnsServer: String?,
+        transport: String,
+        privateDnsActive: Boolean
+    ): WritableMap {
+        val map = Arguments.createMap()
+        val arr = Arguments.createArray()
+        for (s in servers) arr.pushString(s)
+        map.putArray("servers", arr)
+        map.putString("transport", transport)
+        map.putBoolean("privateDnsActive", privateDnsActive)
+        if (privateDnsServer != null) {
+            map.putString("privateDnsServer", privateDnsServer)
+        } else {
+            map.putNull("privateDnsServer")
+        }
+        return map
     }
 
     @ReactMethod

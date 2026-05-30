@@ -13,4 +13,7 @@ RCT_EXTERN_METHOD(resolveDns:(NSString *)host
                   resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(getSystemDnsServers:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+
 @end

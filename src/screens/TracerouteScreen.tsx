@@ -18,6 +18,7 @@ import DnsSelectionModal from '../components/DnsSelectionModal';
 import {useTraceroute} from '../hooks/useTraceroute';
 import {useHistory} from '../hooks/useHistory';
 import {resolveDns} from '../services/tracerouteService';
+import {normalizeHost, isIp} from '../utils/host';
 import {Colors, Spacing, FontSize, FontFamily} from '../theme';
 import type {HopData, ViewMode} from '../types';
 
@@ -40,26 +41,29 @@ export default function TracerouteScreen() {
 
   const handleTrace = useCallback(
     async (host: string) => {
-      addHistory(host);
-      const isIp = /^(\d{1,3}\.){3}\d{1,3}$/.test(host) || host.includes(':');
-      
-      if (isIp) {
-        trace(host);
+      // Defense in depth — InputBar already normalizes, but other callers
+      // (history, deep links, future entry points) might not.
+      const cleaned = normalizeHost(host);
+      if (!cleaned) return;
+      addHistory(cleaned);
+
+      if (isIp(cleaned)) {
+        trace(cleaned);
         return;
       }
-      
+
       setIsResolving(true);
-      const ips = await resolveDns(host);
+      const ips = await resolveDns(cleaned);
       setIsResolving(false);
-      
+
       if (ips.length > 1) {
-        setPendingDomain(host);
+        setPendingDomain(cleaned);
         setDnsOptions(ips);
         setShowDnsModal(true);
       } else if (ips.length === 1) {
         trace(ips[0]);
       } else {
-        trace(host);
+        trace(cleaned);
       }
     },
     [trace, addHistory],

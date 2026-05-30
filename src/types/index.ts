@@ -48,11 +48,19 @@ export interface PingSummary {
   results: PingResult[];
 }
 
+export interface SystemDnsInfo {
+  servers: string[];
+  transport: string;           // "wifi" | "cellular" | "ethernet" | "vpn" | "other" | "none" | "unknown"
+  privateDnsActive: boolean;   // true if Android Private DNS (DoT) is on
+  privateDnsServer: string | null;
+}
+
 export interface LocalNetworkInfo {
   ipv4: string | null;
   ipv6: string | null;
   publicIp: string | null;
-  dns: string[];
+  dns: string[];               // reachability probes against public resolvers
+  systemDns: SystemDnsInfo;    // actual DNS handed out by the OS for the active network
   connectionType: string;
 }
 

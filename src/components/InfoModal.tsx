@@ -99,14 +99,65 @@ export default function InfoModal({visible, onClose}: InfoModalProps) {
 
               <View style={styles.divider} />
 
-              {/* DNS */}
+              {/* System DNS — what the OS hands out for the active network */}
               <View style={styles.dnsSection}>
                 <View style={styles.dnsHeader}>
                   <Icon name="dns" size={16} color={Colors.textMuted} />
-                  <Text style={styles.dnsLabel}>DNS Resolution Test</Text>
+                  <Text style={styles.dnsLabel}>
+                    System DNS
+                    {info.systemDns.transport !== 'unknown' &&
+                      info.systemDns.transport !== 'none' &&
+                      ` · ${info.systemDns.transport.toUpperCase()}`}
+                  </Text>
+                </View>
+                {info.systemDns.servers.length > 0 ? (
+                  info.systemDns.servers.map((server, index) => {
+                    const isPrivate =
+                      info.systemDns.privateDnsActive &&
+                      server === info.systemDns.privateDnsServer;
+                    return (
+                      <View key={`sys-${index}`} style={styles.dnsRow}>
+                        <View
+                          style={[
+                            styles.dnsDot,
+                            isPrivate && {backgroundColor: Colors.success},
+                          ]}
+                        />
+                        <Text style={styles.dnsText}>
+                          {server}
+                          {isPrivate && ' · DoT'}
+                        </Text>
+                      </View>
+                    );
+                  })
+                ) : info.systemDns.privateDnsServer ? (
+                  <View style={styles.dnsRow}>
+                    <View
+                      style={[styles.dnsDot, {backgroundColor: Colors.success}]}
+                    />
+                    <Text style={styles.dnsText}>
+                      {info.systemDns.privateDnsServer} · DoT
+                    </Text>
+                  </View>
+                ) : (
+                  <View style={styles.dnsRow}>
+                    <Text style={[styles.dnsText, {fontStyle: 'italic'}]}>
+                      not exposed by OS
+                    </Text>
+                  </View>
+                )}
+              </View>
+
+              <View style={styles.divider} />
+
+              {/* DNS Reachability — public-resolver latency probes */}
+              <View style={styles.dnsSection}>
+                <View style={styles.dnsHeader}>
+                  <Icon name="speedometer" size={16} color={Colors.textMuted} />
+                  <Text style={styles.dnsLabel}>Public Resolver Latency</Text>
                 </View>
                 {info.dns.map((dns, index) => (
-                  <View key={index} style={styles.dnsRow}>
+                  <View key={`probe-${index}`} style={styles.dnsRow}>
                     <View style={styles.dnsDot} />
                     <Text style={styles.dnsText}>{dns}</Text>
                   </View>

@@ -1,5 +1,7 @@
 import Foundation
 import React
+import Darwin
+import Network
 
 @objc(TracerouteModule)
 class TracerouteModule: RCTEventEmitter {
@@ -145,6 +147,121 @@ class TracerouteModule: RCTEventEmitter {
                 resolve(summary)
             }
         }
+    }
+
+    /**
+     * Returns the DNS servers configured on the *currently active* path.
+     * Uses NWPathMonitor to identify the current interface (wifi/cellular/etc.)
+     * and reads the system resolver config via res_9_ninit / nsaddr_list.
+     * On iOS, libresolv reflects the path-specific resolvers chosen by the
+     * networking stack, so this gives the same answer the OS uses for DNS.
+     */
+    @objc
+    func getSystemDnsServers(_ resolve: @escaping RCTPromiseResolveBlock,
+                             reject: @escaping RCTPromiseRejectBlock) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let servers = Self.readResolvers()
+            let transport = Self.detectTransport()
+            let result: [String: Any] = [
+                "servers": servers,
+                "transport": transport,
+                "privateDnsActive": false,        // iOS doesn't expose a system-wide DoT toggle
+                "privateDnsServer": NSNull()
+            ]
+            resolve(result)
+        }
+    }
+
+    /**
+     * Read the active DNS resolvers from libresolv. iOS keeps a per-path
+     * resolver state here that mirrors what the OS would use — switching
+     * between WiFi and cellular flips the answers automatically.
+     *
+     * SCDynamicStore would be cleaner but its `State:/Network/...` keys are
+     * not readable from a sandboxed iOS app; libresolv is the supported path.
+     */
+    private static func readResolvers() -> [String] {
+        var state = __res_9_state()
+        guard res_9_ninit(&state) == 0 else { return [] }
+        defer { res_9_ndestroy(&state) }
+
+        var collected: [String] = []
+        var seen = Set<String>()
+
+        // IPv4 — nsaddr_list is a fixed-size C array imported as a Swift tuple
+        // (sockaddr_in, sockaddr_in, sockaddr_in). Use a pointer rebind to walk it.
+        let v4Count = Int(state.nscount)
+        if v4Count > 0 {
+            withUnsafePointer(to: &state.nsaddr_list) { tuplePtr in
+                tuplePtr.withMemoryRebound(to: sockaddr_in.self, capacity: v4Count) { ptr in
+                    for i in 0..<v4Count {
+                        var sa = ptr[i]
+                        var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+                        if inet_ntop(AF_INET, &sa.sin_addr, &buf, socklen_t(INET_ADDRSTRLEN)) != nil {
+                            let s = String(cString: buf)
+                            // 0.0.0.0 marks an empty slot
+                            if !s.isEmpty, s != "0.0.0.0", seen.insert(s).inserted {
+                                collected.append(s)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // IPv6 — _u._ext.nsaddrs is an optional pointer array; iterate similarly.
+        let v6Count = Int(state._u._ext.nscount)
+        if v6Count > 0 {
+            withUnsafePointer(to: &state._u._ext.nsaddrs) { tuplePtr in
+                tuplePtr.withMemoryRebound(to: UnsafeMutablePointer<sockaddr_in6>?.self,
+                                           capacity: v6Count) { ptr in
+                    for i in 0..<v6Count {
+                        guard let saPtr = ptr[i] else { continue }
+                        var sa = saPtr.pointee
+                        var buf = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+                        if inet_ntop(AF_INET6, &sa.sin6_addr, &buf, socklen_t(INET6_ADDRSTRLEN)) != nil {
+                            let s = String(cString: buf)
+                            if !s.isEmpty, seen.insert(s).inserted {
+                                collected.append(s)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return collected
+    }
+
+    /**
+     * Best-effort transport classification. NWPathMonitor's first update is
+     * async, so we kick one off and wait briefly — good enough for an
+     * info-modal call site.
+     */
+    private static func detectTransport() -> String {
+        let monitor = NWPathMonitor()
+        let queue = DispatchQueue(label: "supertrace.path-detect")
+        let semaphore = DispatchSemaphore(value: 0)
+        var transport = "unknown"
+
+        monitor.pathUpdateHandler = { path in
+            if path.status != .satisfied {
+                transport = "none"
+            } else if path.usesInterfaceType(.wifi) {
+                transport = "wifi"
+            } else if path.usesInterfaceType(.cellular) {
+                transport = "cellular"
+            } else if path.usesInterfaceType(.wiredEthernet) {
+                transport = "ethernet"
+            } else if path.usesInterfaceType(.other) {
+                transport = "other"
+            }
+            semaphore.signal()
+        }
+        monitor.start(queue: queue)
+        _ = semaphore.wait(timeout: .now() + 0.5)
+        monitor.cancel()
+        return transport
     }
 
     @objc

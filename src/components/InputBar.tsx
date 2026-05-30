@@ -10,6 +10,7 @@ import {
 } from 'react-native';
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
 import {Colors, Spacing, BorderRadius, FontSize, FontFamily, Shadow} from '../theme';
+import {normalizeHost} from '../utils/host';
 import type {TracerouteStatus, ViewMode} from '../types';
 
 interface InputBarProps {
@@ -40,11 +41,13 @@ export default function InputBar({
   const isRunning = status === 'running' || isResolving;
 
   const handleTrace = () => {
-    const trimmed = host.trim();
-    if (!trimmed) return;
+    const cleaned = normalizeHost(host);
+    if (!cleaned) return;
+    // Reflect the cleaned value back so the user sees what we'll trace.
+    if (cleaned !== host) setHost(cleaned);
     Keyboard.dismiss();
     setIsFocused(false);
-    onTrace(trimmed);
+    onTrace(cleaned);
   };
 
   const handleStop = () => {
@@ -52,10 +55,11 @@ export default function InputBar({
   };
 
   const handleSelectHistory = (h: string) => {
-    setHost(h);
+    const cleaned = normalizeHost(h);
+    setHost(cleaned);
     Keyboard.dismiss();
     setIsFocused(false);
-    onTrace(h);
+    onTrace(cleaned);
   };
 
   return (
