@@ -9,17 +9,27 @@ const EMPTY_SYSTEM_DNS: SystemDnsInfo = {
   transport: 'unknown',
   privateDnsActive: false,
   privateDnsServer: null,
+  perTransport: {},
 };
 
 async function fetchSystemDns(): Promise<SystemDnsInfo> {
   try {
     if (!TracerouteModule?.getSystemDnsServers) return EMPTY_SYSTEM_DNS;
     const result = await TracerouteModule.getSystemDnsServers();
+    const perTransport: Record<string, string[]> = {};
+    if (result?.perTransport && typeof result.perTransport === 'object') {
+      for (const [k, v] of Object.entries(result.perTransport)) {
+        if (Array.isArray(v)) {
+          perTransport[k] = v.filter((x): x is string => typeof x === 'string');
+        }
+      }
+    }
     return {
       servers: Array.isArray(result?.servers) ? result.servers : [],
       transport: typeof result?.transport === 'string' ? result.transport : 'unknown',
       privateDnsActive: !!result?.privateDnsActive,
       privateDnsServer: result?.privateDnsServer ?? null,
+      perTransport,
     };
   } catch (e) {
     console.warn('getSystemDnsServers failed:', e);

@@ -9,46 +9,55 @@ import {SafeAreaProvider} from 'react-native-safe-area-context';
 import {NavigationContainer} from '@react-navigation/native';
 import {createNativeStackNavigator} from '@react-navigation/native-stack';
 import TracerouteScreen from './src/screens/TracerouteScreen';
+import SettingsScreen from './src/screens/SettingsScreen';
+import {I18nProvider} from './src/i18n';
 import {Colors} from './src/theme';
 
 const Stack = createNativeStackNavigator();
 
 function App() {
   return (
-    <SafeAreaProvider>
-      <StatusBar
-        barStyle="light-content"
-        backgroundColor={Colors.background}
-        translucent={false}
-      />
-      <NavigationContainer
-        theme={{
-          dark: true,
-          colors: {
-            primary: Colors.primary,
-            background: Colors.background,
-            card: Colors.surface,
-            text: Colors.text,
-            border: Colors.surfaceBorder,
-            notification: Colors.accent,
-          },
-          fonts: {
-            regular: {fontFamily: 'System', fontWeight: '400'},
-            medium: {fontFamily: 'System', fontWeight: '500'},
-            bold: {fontFamily: 'System', fontWeight: '700'},
-            heavy: {fontFamily: 'System', fontWeight: '800'},
-          },
-        }}>
-        <Stack.Navigator
-          screenOptions={{
-            headerShown: false,
-            contentStyle: {backgroundColor: Colors.background},
-            animation: 'fade',
+    <I18nProvider>
+      <SafeAreaProvider>
+        <StatusBar
+          barStyle="light-content"
+          backgroundColor={Colors.background}
+          translucent={false}
+        />
+        <NavigationContainer
+          theme={{
+            dark: true,
+            colors: {
+              primary: Colors.primary,
+              background: Colors.background,
+              card: Colors.surface,
+              text: Colors.text,
+              border: Colors.surfaceBorder,
+              notification: Colors.accent,
+            },
+            fonts: {
+              regular: {fontFamily: 'System', fontWeight: '400'},
+              medium: {fontFamily: 'System', fontWeight: '500'},
+              bold: {fontFamily: 'System', fontWeight: '700'},
+              heavy: {fontFamily: 'System', fontWeight: '800'},
+            },
           }}>
-          <Stack.Screen name="Traceroute" component={TracerouteScreen} />
-        </Stack.Navigator>
-      </NavigationContainer>
-    </SafeAreaProvider>
+          <Stack.Navigator
+            screenOptions={{
+              headerShown: false,
+              contentStyle: {backgroundColor: Colors.background},
+              animation: 'fade',
+            }}>
+            <Stack.Screen name="Traceroute" component={TracerouteScreen} />
+            <Stack.Screen
+              name="Settings"
+              component={SettingsScreen}
+              options={{animation: 'slide_from_right'}}
+            />
+          </Stack.Navigator>
+        </NavigationContainer>
+      </SafeAreaProvider>
+    </I18nProvider>
   );
 }
 

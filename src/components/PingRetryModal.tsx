@@ -11,6 +11,7 @@ import {
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
 import { Colors, Spacing, BorderRadius, FontSize, FontFamily, Shadow } from '../theme';
 import { pingHost } from '../services/tracerouteService';
+import { useT } from '../i18n';
 import type { PingSummary, PingResult } from '../types';
 
 interface PingRetryModalProps {
@@ -24,6 +25,7 @@ export default function PingRetryModal({
   ip,
   onClose,
 }: PingRetryModalProps) {
+  const t = useT();
   const [count, setCount] = useState(5);
   const [pinging, setPinging] = useState(false);
   const [summary, setSummary] = useState<PingSummary | null>(null);
@@ -128,7 +130,7 @@ export default function PingRetryModal({
           {/* Header */}
           <View style={styles.header}>
             <View>
-              <Text style={styles.title}>Ping Test</Text>
+              <Text style={styles.title}>{t('pingTest')}</Text>
               <Text style={styles.subtitle}>{ip}</Text>
             </View>
             <TouchableOpacity onPress={handleClose} style={styles.closeBtn}>
@@ -140,7 +142,7 @@ export default function PingRetryModal({
 
           {/* Count selector */}
           <View style={styles.countSection}>
-            <Text style={styles.countLabel}>Number of Pings</Text>
+            <Text style={styles.countLabel}>{t('numberOfPings')}</Text>
             <View style={styles.countRow}>
               <TouchableOpacity
                 style={styles.countBtn}
@@ -190,12 +192,12 @@ export default function PingRetryModal({
             {pinging ? (
               <>
                 <ActivityIndicator size="small" color={Colors.white} />
-                <Text style={styles.startText}>Pinging...</Text>
+                <Text style={styles.startText}>{t('pinging')}</Text>
               </>
             ) : (
               <>
                 <Icon name="play" size={18} color={Colors.white} />
-                <Text style={styles.startText}>Start Ping</Text>
+                <Text style={styles.startText}>{t('startPing')}</Text>
               </>
             )}
           </TouchableOpacity>
@@ -218,9 +220,9 @@ export default function PingRetryModal({
                   <View style={{ position: 'absolute', top: -14, left: Spacing.xxl }}>
                      <Text style={{ color: Colors.accent, fontSize: 10, fontWeight: '700' }}>[RESULTS READY]</Text>
                   </View>
-                  <StatBadge label="Sent" value={`${summary.sent}`} color={Colors.text} />
-                  <StatBadge label="Online" value={`${summary.received}`} color={Colors.success} />
-                  <StatBadge label="Loss" value={`${summary.lossPercent.toFixed(0)}%`} 
+                  <StatBadge label={t('sent')} value={`${summary.sent}`} color={Colors.text} />
+                  <StatBadge label={t('online')} value={`${summary.received}`} color={Colors.success} />
+                  <StatBadge label={t('loss')} value={`${summary.lossPercent.toFixed(0)}%`} 
                     color={summary.lossPercent > 0 ? Colors.error : Colors.success} />
                 </View>
 
@@ -249,7 +251,7 @@ export default function PingRetryModal({
                         {typeof item.rtt === 'number' ? (
                           <Text style={styles.rttText}>{item.rtt.toFixed(2)} ms</Text>
                         ) : (
-                          <Text style={styles.cardErrorText}>Request Timeout</Text>
+                          <Text style={styles.cardErrorText}>{t('requestTimeout')}</Text>
                         )}
                         <Text style={styles.ipText}>{ip}</Text>
                       </View>
@@ -265,10 +267,10 @@ export default function PingRetryModal({
                 {pinging ? (
                   <View style={{ alignItems: 'center' }}>
                     <ActivityIndicator size="small" color={Colors.accent} />
-                    <Text style={[styles.placeholderText, { marginTop: 10 }]}>Waiting for native response...</Text>
+                    <Text style={[styles.placeholderText, { marginTop: 10 }]}>{t('waitingForNative')}</Text>
                   </View>
                 ) : (
-                  <Text style={styles.placeholderText}>Hit START to begin diagnostic test</Text>
+                  <Text style={styles.placeholderText}>{t('hitStart')}</Text>
                 )}
               </View>
             )}

@@ -5,18 +5,14 @@ import android.net.ConnectivityManager
 import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.NetworkInfo
+import android.net.RouteInfo
 import android.os.Build
-import android.system.ErrnoException
-import android.system.Os
-import android.system.OsConstants
-import android.system.StructTimeval
 import com.facebook.react.bridge.*
 import com.facebook.react.modules.core.DeviceEventManagerModule
 import kotlinx.coroutines.*
-import java.io.FileDescriptor
-import java.net.Inet4Address
 import java.net.InetAddress
-import java.net.InetSocketAddress
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -29,18 +25,20 @@ class TracerouteModule(reactContext: ReactApplicationContext) :
         private const val EVENT_HOP_RESULT = "onHopResult"
         private const val EVENT_TRACE_COMPLETE = "onTraceComplete"
         private const val EVENT_TRACE_ERROR = "onTraceError"
+        private const val TAG = "SuperTraceTraceroute"
 
-        // Linux uapi/in.h IP_TTL = 2. OsConstants.IP_TTL was only made public
-        // in newer SDKs; the on-wire value has been stable since Linux 1.0,
-        // so hardcoding is safe across every Android release we support.
-        private const val IP_TTL_OPT = 2
+        // IPv4 dotted quad after a "from" keyword. Matches both
+        // "From X.X.X.X icmp_seq=N Time to live exceeded" (mid-path)
+        // and "64 bytes from X.X.X.X:" (destination Echo Reply).
+        private val FROM_PATTERN = Regex("""[Ff]rom\s+([0-9]{1,3}(?:\.[0-9]{1,3}){3})""")
+        // Round-trip time on Echo Reply lines.
+        private val RTT_PATTERN = Regex("""time[=<]\s*([\d.]+)\s*ms""")
     }
 
     override fun getName(): String = NAME
 
     private var tracerouteJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private val probeSeq = AtomicInteger(0)
 
     @ReactMethod
     fun startTraceroute(host: String, maxHops: Int, timeoutMs: Int) {
@@ -72,7 +70,15 @@ class TracerouteModule(reactContext: ReactApplicationContext) :
                 }
 
                 val minDestinationTtl = AtomicInteger(maxHops + 1)
-                val semaphore = Semaphore(8) // Limit concurrent ping sweeps to 8
+                // Concurrency = 4. Higher than this and parallel `ping`
+                // shells contend for CPU enough to inflate the RTT readings
+                // (we saw ~45ms hops at 8-way parallel that were really 5ms).
+                // Lower than this (we tried 1) and a single ping-blocked
+                // router stalls the whole list for the full -W timeout
+                // every time. 4 is the sweet spot: blocked hops still cost
+                // 5s each but they don't stall responsive ones behind them,
+                // and direct-ping timing stays honest.
+                val semaphore = Semaphore(4)
 
                 val jobs = (1..maxHops).map { ttl ->
                     async {
@@ -119,10 +125,25 @@ class TracerouteModule(reactContext: ReactApplicationContext) :
     }
 
     /**
-     * Returns the DNS servers handed out by the OS for the *currently active*
-     * network. On modern Android this hits ConnectivityManager.getLinkProperties,
-     * which honours per-network resolvers (so cellular and WiFi report different
-     * answers when both are up). Includes Private DNS (DoT) hostname when set.
+     * Resolve every DNS server the OS would consult right now.
+     *
+     * Strategy mirrors `besttrace`'s DnsServersDetector chain (the de-facto
+     * reference for "give me the real LTE/WiFi DNS"): walk every connected
+     * network, classify by default-route presence so primary resolvers come
+     * first, group results by transport so the UI can render "WiFi:..."
+     * and "Cellular:..." separately, then fall back to `getprop` parsing
+     * for OEMs that hide DNS from sandboxed apps.
+     *
+     * Result shape:
+     *   {
+     *     servers: ["1.1.1.1", ...],            // union, default-route first
+     *     transport: "wifi" | "cellular" | ...,  // active network's transport
+     *     privateDnsActive: bool,
+     *     privateDnsServer: string | null,
+     *     perTransport: {                        // detailed per-network split
+     *       wifi: [...], cellular: [...], ethernet: [...], vpn: [...], other: [...]
+     *     }
+     *   }
      */
     @ReactMethod
     fun getSystemDnsServers(promise: Promise) {
@@ -130,57 +151,143 @@ class TracerouteModule(reactContext: ReactApplicationContext) :
             try {
                 val cm = reactApplicationContext.getSystemService(Context.CONNECTIVITY_SERVICE)
                     as? ConnectivityManager
-                if (cm == null) {
-                    promise.resolve(buildDnsResult(emptyList(), null, "unknown", false))
-                    return@launch
-                }
 
-                val network: Network? = cm.activeNetwork
-                if (network == null) {
-                    promise.resolve(buildDnsResult(emptyList(), null, "none", false))
-                    return@launch
-                }
+                // Active network's transport — used by the UI as the headline
+                // ("System DNS · WIFI"). Independent of the per-transport map.
+                val activeTransport = cm?.activeNetwork?.let { transportName(cm, it) } ?: "unknown"
 
-                val props: LinkProperties? = cm.getLinkProperties(network)
-                val caps: NetworkCapabilities? = cm.getNetworkCapabilities(network)
-
-                val transport = when {
-                    caps == null -> "unknown"
-                    caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
-                    caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
-                    caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
-                    caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) -> "vpn"
-                    else -> "other"
-                }
-
-                val servers = props?.dnsServers
-                    ?.mapNotNull { it.hostAddress }
-                    ?.distinct()
-                    ?: emptyList()
-
-                // Private DNS (DoT) was added in API 28. Best-effort surface it.
-                var privateDnsServer: String? = null
+                // Phase 1: enumerate every connected network and bucket DNS
+                // servers by transport + default-route. Default-route networks
+                // are what the OS would actually resolve through, so we
+                // surface them as the primary list.
+                val perTransport = LinkedHashMap<String, MutableList<String>>()
+                val primary = mutableListOf<String>()   // default-route networks
+                val secondary = mutableListOf<String>() // others (peer / niche routes)
                 var privateDnsActive = false
-                if (props != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                    privateDnsActive = props.isPrivateDnsActive
-                    privateDnsServer = props.privateDnsServerName
+                var privateDnsServer: String? = null
+
+                if (cm != null) {
+                    val networks: Array<Network> = try { cm.allNetworks } catch (e: Exception) {
+                        emptyArray()
+                    }
+                    for (network in networks) {
+                        val info: NetworkInfo? = try { cm.getNetworkInfo(network) } catch (e: Exception) { null }
+                        if (info == null || !info.isConnected) continue
+
+                        val lp: LinkProperties = cm.getLinkProperties(network) ?: continue
+                        val transport = transportName(cm, network)
+                        val isDefault = lp.routes.any { it.isDefaultRoute }
+
+                        val ips = lp.dnsServers.mapNotNull { it.hostAddress }
+                        val bucket = perTransport.getOrPut(transport) { mutableListOf() }
+                        for (ip in ips) {
+                            if (ip !in bucket) bucket.add(ip)
+                            val target = if (isDefault) primary else secondary
+                            if (ip !in target) target.add(ip)
+                        }
+
+                        // Private DNS (DoT) — surface from whichever network has it on.
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && !privateDnsActive) {
+                            if (lp.isPrivateDnsActive) {
+                                privateDnsActive = true
+                                privateDnsServer = lp.privateDnsServerName
+                            }
+                        }
+                    }
                 }
+
+                // Mirror besttrace: if no default-route network gave anything,
+                // fall back to the secondary bucket so something shows up.
+                val combined = if (primary.isNotEmpty()) primary else secondary
+
+                // Phase 2: getprop fallback. Some OEM ROMs return empty
+                // dnsServers from ConnectivityManager for sandboxed apps as
+                // a privacy measure — `getprop` still leaks the per-radio
+                // properties (`net.rmnet0.dns1`, `vendor.net.dns1`, etc.).
+                val finalCombined = if (combined.isEmpty()) {
+                    val viaProp = readDnsViaGetprop()
+                    if (viaProp.isNotEmpty() && perTransport.isEmpty()) {
+                        // Couldn't classify by transport, so park it under
+                        // "other" so the UI still shows something useful.
+                        perTransport["other"] = viaProp.toMutableList()
+                    }
+                    viaProp
+                } else combined
 
                 promise.resolve(
-                    buildDnsResult(servers, privateDnsServer, transport, privateDnsActive)
+                    buildDnsResult(finalCombined, privateDnsServer, activeTransport, privateDnsActive, perTransport)
                 )
             } catch (e: Exception) {
                 android.util.Log.w("SuperTrace", "getSystemDnsServers failed: ${e.message}")
-                promise.resolve(buildDnsResult(emptyList(), null, "unknown", false))
+                promise.resolve(buildDnsResult(emptyList(), null, "unknown", false, emptyMap()))
             }
         }
+    }
+
+    private fun transportName(cm: ConnectivityManager, network: Network): String {
+        val caps: NetworkCapabilities? = try { cm.getNetworkCapabilities(network) } catch (e: Exception) { null }
+        return when {
+            caps == null -> "unknown"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) -> "vpn"
+            else -> "other"
+        }
+    }
+
+    /**
+     * Parse `getprop` output for any property whose key ends with `.dns`,
+     * `.dns1`, `.dns2`, `.dns3`, or `.dns4` and whose value is a valid IP.
+     *
+     * Modern ROMs put cellular DNS under vendor-prefixed keys like
+     * `net.rmnet0.dns1` or `vendor.net.dns1`, which is why we match by
+     * suffix instead of looking for the bare `net.dns1`. Same approach
+     * besttrace uses (DnsServersDetector.f).
+     */
+    private fun readDnsViaGetprop(): List<String> {
+        val out = LinkedHashSet<String>()
+        try {
+            val proc = ProcessBuilder("getprop").redirectErrorStream(true).start()
+            proc.inputStream.bufferedReader().use { reader ->
+                while (true) {
+                    val line = reader.readLine() ?: break
+                    // getprop format: "[key]: [value]"
+                    val keyEnd = line.indexOf("]: [")
+                    if (keyEnd <= 1) continue
+                    val key = line.substring(1, keyEnd)
+                    val valueEnd = line.length - 1
+                    val valueStart = keyEnd + 4
+                    if (valueEnd < valueStart) continue
+                    val value = line.substring(valueStart, valueEnd)
+                    if (value.isEmpty()) continue
+                    if (!(key.endsWith(".dns") || key.endsWith(".dns1")
+                                || key.endsWith(".dns2") || key.endsWith(".dns3")
+                                || key.endsWith(".dns4"))) continue
+                    // Validate — getprop sometimes contains stale or malformed
+                    // entries. Only keep things that parse as a real IP.
+                    try {
+                        val addr = java.net.InetAddress.getByName(value)
+                        val host = addr.hostAddress
+                        if (!host.isNullOrEmpty() && host != "0.0.0.0" && host != "::") {
+                            out.add(host)
+                        }
+                    } catch (_: Exception) { /* not an IP */ }
+                }
+            }
+            proc.waitFor()
+        } catch (e: Exception) {
+            android.util.Log.v(TAG, "getprop DNS fallback failed: ${e.message}")
+        }
+        return out.toList()
     }
 
     private fun buildDnsResult(
         servers: List<String>,
         privateDnsServer: String?,
         transport: String,
-        privateDnsActive: Boolean
+        privateDnsActive: Boolean,
+        perTransport: Map<String, List<String>>
     ): WritableMap {
         val map = Arguments.createMap()
         val arr = Arguments.createArray()
@@ -193,6 +300,13 @@ class TracerouteModule(reactContext: ReactApplicationContext) :
         } else {
             map.putNull("privateDnsServer")
         }
+        val perTransportMap = Arguments.createMap()
+        for ((t, ips) in perTransport) {
+            val a = Arguments.createArray()
+            for (ip in ips) a.pushString(ip)
+            perTransportMap.putArray(t, a)
+        }
+        map.putMap("perTransport", perTransportMap)
         return map
     }
 
@@ -337,27 +451,58 @@ class TracerouteModule(reactContext: ReactApplicationContext) :
         val result = WritableNativeMap()
         result.putInt("hop", ttl)
 
-        val rttValues = DoubleArray(3) { -1.0 }
-        var hopIp: String? = null
+        // Phase 1: TTL discovery — find which router is at this hop.
+        val (hopIp, ttlRtts, parsedAtTtl) = pingTtlDiscover(target, ttl, timeoutMs)
+        if (hopIp == null) {
+            result.putNull("ip")
+            for (i in 0 until 3) result.putNull("rtt${i + 1}")
+            result.putBoolean("done", false)
+            return result
+        }
 
-        // 3 probes per hop. Each probe uses a fresh socket pair so we can
-        // parallelise across hops without responses cross-contaminating.
-        for (probe in 0 until 3) {
-            val (ip, rtt) = sendProbe(target, ttl, timeoutMs)
-            if (ip != null) {
-                hopIp = ip
-                if (rtt != null) rttValues[probe] = rtt
+        // Emit a partial result NOW so the row appears with IP + "—" RTTs
+        // before we go off and do the direct ping. Otherwise hops that
+        // block direct ping for the full 5s timeout don't show up at all
+        // until the timeout, even though we already know their IP.
+        val partial = WritableNativeMap().apply {
+            putInt("hop", ttl)
+            putString("ip", hopIp)
+            for (i in 0 until 3) putNull("rtt${i + 1}")
+            putBoolean("done", hopIp == target.hostAddress)
+        }
+        sendHopResult(partial)
+
+        result.putString("ip", hopIp)
+
+        // Phase 2: accurate RTT. If discovery already saw a kernel-printed
+        // Echo Reply (we hit the destination at this TTL), reuse those —
+        // they're real. Otherwise direct-ping the discovered IP and stream
+        // each probe back to the UI as it lands, so the user sees rtt1
+        // appear, then rtt2, then rtt3 instead of three at once.
+        val finalRtts = DoubleArray(3) { -1.0 }
+        if (parsedAtTtl) {
+            for (i in 0 until 3) ttlRtts.getOrNull(i)?.let { finalRtts[i] = it }
+        } else {
+            pingDirectStreaming(hopIp, timeoutMs) { idx, rttMs ->
+                if (idx in 0..2 && rttMs != null && rttMs >= 0) {
+                    finalRtts[idx] = rttMs
+                    // Emit a fresh snapshot after every probe.
+                    val snapshot = WritableNativeMap().apply {
+                        putInt("hop", ttl)
+                        putString("ip", hopIp)
+                        for (i in 0 until 3) {
+                            if (finalRtts[i] >= 0) putDouble("rtt${i + 1}", finalRtts[i])
+                            else putNull("rtt${i + 1}")
+                        }
+                        putBoolean("done", hopIp == target.hostAddress)
+                    }
+                    sendHopResult(snapshot)
+                }
             }
         }
 
-        if (hopIp != null) {
-            result.putString("ip", hopIp)
-        } else {
-            result.putNull("ip")
-        }
-
         for (i in 0 until 3) {
-            val rtt = rttValues[i]
+            val rtt = finalRtts[i]
             if (rtt >= 0) result.putDouble("rtt${i + 1}", rtt)
             else result.putNull("rtt${i + 1}")
         }
@@ -367,109 +512,121 @@ class TracerouteModule(reactContext: ReactApplicationContext) :
     }
 
     /**
-     * One traceroute probe: send an ICMP Echo Request with TTL=ttl on an
-     * unprivileged ICMP datagram socket. Linux delivers two kinds of
-     * responses to that socket:
+     * Discovery probe — fire `ping -c 1 -t TTL <target>` and parse the
+     * "From X.X.X.X" line to identify the router at this TTL.
      *
-     *   - ICMP Time Exceeded (type 11) from a mid-path router whose decrement
-     *     hit 0. The fromAddr on recvfrom is the router's IP — that's the hop.
-     *   - ICMP Echo Reply (type 0) from the destination once TTL is large
-     *     enough to actually arrive. fromAddr is the destination IP.
+     * Single probe (-c 1) is intentional: discovery only needs the hop IP,
+     * not timing. Going to -c 3 here was costing ~3× wall-clock per hop
+     * for no benefit — the accurate RTT comes from `pingDirect` afterwards.
      *
-     * Why ICMP and not UDP-with-ICMP-recv: an unprivileged ICMP datagram
-     * socket only demuxes responses that match its own outgoing requests.
-     * UDP-out + ICMP-in (the classic raw-socket traceroute pattern) needs
-     * CAP_NET_RAW, which apps never have on Android.
-     *
-     * Why this works on Android specifically: /proc/sys/net/ipv4/ping_group_range
-     * defaults to "0 2147483647" — every app gid is allowed to open
-     * SOCK_DGRAM+IPPROTO_ICMP. The kernel attaches the socket to the request
-     * via its ID field and routes both Echo Replies AND in-transit
-     * Time Exceeded back to it.
-     *
-     * The previous implementation shelled out to `ping -t <ttl>`, which
-     * silently failed because Android's toybox ping interprets `-t` as
-     * timeout (BSD-style) instead of TTL (iputils-style). Every probe
-     * arrived at the destination with default TTL=64, so traceroute
-     * appeared to terminate at hop 1.
+     * Returns (hopIp, rtts, parsed): if `parsed` is true the rtts came
+     * from a kernel Echo Reply (we already hit the destination at this
+     * TTL — accurate); otherwise rtts is empty and the caller should
+     * direct-ping the discovered IP for real timing.
      */
-    private fun sendProbe(target: InetAddress, ttl: Int, timeoutMs: Int): Pair<String?, Double?> {
-        if (target !is Inet4Address) {
-            // IPv6 traceroute would need IPV6_UNICAST_HOPS + ICMPv6 — out of scope.
-            return Pair(null, null)
+    private fun pingTtlDiscover(
+        target: InetAddress,
+        ttl: Int,
+        timeoutMs: Int
+    ): Triple<String?, List<Double?>, Boolean> {
+        val timeoutSec = (timeoutMs / 1000).coerceAtLeast(1).toString()
+        val targetIp = target.hostAddress ?: return Triple(null, emptyList(), false)
+
+        val variants = listOf(
+            arrayOf("ping", "-c", "1", "-t", ttl.toString(), "-W", timeoutSec, targetIp),
+            arrayOf("/system/bin/ping", "-c", "1", "-t", ttl.toString(), "-W", timeoutSec, targetIp)
+        )
+
+        for (cmd in variants) {
+            try {
+                val proc = ProcessBuilder(*cmd).redirectErrorStream(true).start()
+                val output = proc.inputStream.bufferedReader().use { it.readText() }
+                val finished = proc.waitFor(timeoutMs.toLong() + 2000, TimeUnit.MILLISECONDS)
+                if (!finished) proc.destroyForcibly()
+
+                if (output.isEmpty()) continue
+                val firstFrom = FROM_PATTERN.find(output) ?: continue
+                val ip = firstFrom.groupValues[1]
+                val parsedRtts = RTT_PATTERN.findAll(output)
+                    .mapNotNull { it.groupValues[1].toDoubleOrNull() }
+                    .toList()
+                val rttList: List<Double?> = (0 until 3).map { parsedRtts.getOrNull(it) }
+
+                android.util.Log.d(TAG, "discover ttl=$ttl ip=$ip parsed=${parsedRtts.size}")
+                return Triple(ip, rttList, parsedRtts.isNotEmpty())
+            } catch (e: Exception) {
+                android.util.Log.v(TAG, "discover variant failed (ttl=$ttl): ${e.message}")
+                continue
+            }
         }
-
-        var fd: FileDescriptor? = null
-        try {
-            fd = Os.socket(OsConstants.AF_INET, OsConstants.SOCK_DGRAM, OsConstants.IPPROTO_ICMP)
-            // OsConstants.IP_TTL was only made public in newer SDKs; the Linux
-            // uapi value (2) has been stable since the kernel's 1.0 days.
-            Os.setsockoptInt(fd, OsConstants.IPPROTO_IP, IP_TTL_OPT, ttl)
-            Os.setsockoptTimeval(
-                fd, OsConstants.SOL_SOCKET, OsConstants.SO_RCVTIMEO,
-                StructTimeval.fromMillis(timeoutMs.toLong())
-            )
-            // The unprivileged ICMP socket is "connected" to a kernel-assigned
-            // ID by binding; without bind, sendto silently drops the packet.
-            Os.bind(fd, InetAddress.getByName("0.0.0.0"), 0)
-
-            // Build a minimal ICMP Echo Request. The kernel rewrites the ID
-            // field to its own assignment regardless of what we put — so we
-            // don't need to track it ourselves. Sequence is up to us.
-            val seq = (ttl shl 8) or (probeSeq.incrementAndGet() and 0xFF)
-            val packet = buildIcmpEcho(seq)
-
-            val startNs = System.nanoTime()
-            Os.sendto(fd, packet, 0, packet.size, 0, target, 0)
-
-            val recvBuf = ByteArray(1500)
-            val srcOut = InetSocketAddress(0)
-            val received = Os.recvfrom(fd, recvBuf, 0, recvBuf.size, 0, srcOut)
-            val rttMs = (System.nanoTime() - startNs) / 1_000_000.0
-
-            if (received <= 0) return Pair(null, null)
-            val srcIp = srcOut.address?.hostAddress ?: return Pair(null, null)
-            return Pair(srcIp, rttMs)
-        } catch (e: ErrnoException) {
-            // EAGAIN / EWOULDBLOCK on recvfrom = SO_RCVTIMEO fired = no
-            // response for this TTL within the budget. That's a normal
-            // "* * *" hop, not an error.
-            return Pair(null, null)
-        } catch (e: Exception) {
-            android.util.Log.w("SuperTrace", "probe ttl=$ttl failed: ${e.message}")
-            return Pair(null, null)
-        } finally {
-            try { fd?.let { Os.close(it) } } catch (_: Exception) {}
-        }
+        return Triple(null, emptyList(), false)
     }
 
     /**
-     * Construct an 8-byte ICMP Echo Request header.
-     *   type=8, code=0, checksum, id=0 (kernel rewrites), seq=seq
-     * No payload — the kernel doesn't care and routers don't either.
+     * Direct ping to a known hop IP — no TTL restriction, so we get real
+     * Echo Replies with kernel-printed RTT.
+     *
+     * Streams probe results back through `onProbe(idx, rttMs)` as each
+     * `time=X ms` line is read from ping's stdout. This means flaky hops
+     * (where probe 1 succeeds but 2 and 3 hang on -W timeout) still
+     * surface their first reading immediately rather than blocking the
+     * whole row for ~5s. `idx` is 0-based; rttMs is null when ping never
+     * answered for that probe (the caller can choose how to render it).
+     *
+     * 3 probes at 200ms intervals = ~600ms wall-clock per hop in the
+     * happy path; up to ~3× -W when probes drop.
      */
-    private fun buildIcmpEcho(seq: Int): ByteArray {
-        val pkt = ByteArray(8)
-        pkt[0] = 8        // type: Echo Request
-        pkt[1] = 0        // code
-        pkt[2] = 0; pkt[3] = 0   // checksum (filled in below)
-        pkt[4] = 0; pkt[5] = 0   // id — kernel overwrites for unprivileged ICMP socket
-        pkt[6] = ((seq shr 8) and 0xFF).toByte()
-        pkt[7] = (seq and 0xFF).toByte()
+    private fun pingDirectStreaming(
+        hopIp: String,
+        timeoutMs: Int,
+        onProbe: (idx: Int, rttMs: Double?) -> Unit
+    ) {
+        val timeoutSec = (timeoutMs / 1000).coerceAtLeast(1).toString()
+        val variants = listOf(
+            arrayOf("ping", "-c", "3", "-i", "0.2", "-W", timeoutSec, hopIp),
+            arrayOf("/system/bin/ping", "-c", "3", "-i", "0.2", "-W", timeoutSec, hopIp)
+        )
 
-        // RFC 1071 internet checksum
-        var sum = 0
-        var i = 0
-        while (i < pkt.size - 1) {
-            val word = ((pkt[i].toInt() and 0xFF) shl 8) or (pkt[i + 1].toInt() and 0xFF)
-            sum += word
-            i += 2
+        for (cmd in variants) {
+            try {
+                val proc = ProcessBuilder(*cmd).redirectErrorStream(true).start()
+                var emitted = 0
+                // Read line-by-line so we surface RTTs as ping prints them,
+                // not in a single batch at the end. ping's stdout flushes
+                // per-line by default.
+                proc.inputStream.bufferedReader().use { reader ->
+                    while (true) {
+                        val line = reader.readLine() ?: break
+                        val m = RTT_PATTERN.find(line)
+                        if (m != null) {
+                            val rtt = m.groupValues[1].toDoubleOrNull()
+                            if (rtt != null && emitted < 3) {
+                                onProbe(emitted, rtt)
+                                emitted++
+                            }
+                        }
+                    }
+                }
+                val finished = proc.waitFor(timeoutMs.toLong() * 3 + 3000, TimeUnit.MILLISECONDS)
+                if (!finished) proc.destroyForcibly()
+
+                // Fill remaining slots with null so the caller knows those
+                // probes never answered (e.g. flaky link, partial response).
+                while (emitted < 3) {
+                    onProbe(emitted, null)
+                    emitted++
+                }
+
+                android.util.Log.d(TAG, "direct $hopIp emitted=$emitted")
+                return
+            } catch (e: Exception) {
+                android.util.Log.v(TAG, "direct ping variant failed: ${e.message}")
+                continue
+            }
         }
-        while ((sum shr 16) != 0) sum = (sum and 0xFFFF) + (sum shr 16)
-        val checksum = sum.inv() and 0xFFFF
-        pkt[2] = ((checksum shr 8) and 0xFF).toByte()
-        pkt[3] = (checksum and 0xFF).toByte()
-        return pkt
+        // No variant worked at all — emit three nulls so the caller's
+        // accounting stays consistent.
+        for (i in 0 until 3) onProbe(i, null)
     }
 
     private fun sendHopResult(result: WritableNativeMap) {

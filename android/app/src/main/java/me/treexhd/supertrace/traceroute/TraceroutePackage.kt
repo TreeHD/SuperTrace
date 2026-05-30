@@ -12,6 +12,7 @@ class TraceroutePackage : BaseReactPackage() {
         return when (name) {
             TracerouteModule.NAME -> TracerouteModule(reactContext)
             ReverseDnsModule.NAME -> ReverseDnsModule(reactContext)
+            LocaleModule.NAME -> LocaleModule(reactContext)
             else -> null
         }
     }
@@ -30,6 +31,14 @@ class TraceroutePackage : BaseReactPackage() {
                 ReverseDnsModule.NAME to ReactModuleInfo(
                     ReverseDnsModule.NAME,
                     ReverseDnsModule.NAME,
+                    false,
+                    false,
+                    false,
+                    false
+                ),
+                LocaleModule.NAME to ReactModuleInfo(
+                    LocaleModule.NAME,
+                    LocaleModule.NAME,
                     false,
                     false,
                     false,

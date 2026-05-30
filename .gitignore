@@ -73,3 +73,10 @@ yarn-error.log
 !.yarn/releases
 !.yarn/sdks
 !.yarn/versions
+
+# Misc
+besttrace.apk
+
+# Local dev environment helpers (machine-specific paths)
+build-env.sh
+android/build_out.txt

@@ -8,6 +8,7 @@ import {
   Animated,
 } from 'react-native';
 import {useSafeAreaInsets} from 'react-native-safe-area-context';
+import {useNavigation} from '@react-navigation/native';
 import InputBar from '../components/InputBar';
 import HopCard from '../components/HopCard';
 import HopDetailModal from '../components/HopDetailModal';
@@ -19,11 +20,14 @@ import {useTraceroute} from '../hooks/useTraceroute';
 import {useHistory} from '../hooks/useHistory';
 import {resolveDns} from '../services/tracerouteService';
 import {normalizeHost, isIp} from '../utils/host';
+import {useT} from '../i18n';
 import {Colors, Spacing, FontSize, FontFamily} from '../theme';
 import type {HopData, ViewMode} from '../types';
 
 export default function TracerouteScreen() {
   const insets = useSafeAreaInsets();
+  const navigation = useNavigation<any>();
+  const t = useT();
   const {hops, status, target, error, trace, stop, reset} = useTraceroute();
 
   const [viewMode, setViewMode] = useState<ViewMode>('trace');
@@ -109,19 +113,19 @@ export default function TracerouteScreen() {
       {status === 'idle' && hops.length === 0 && (
         <View style={styles.emptyState}>
           <Text style={styles.emptyIcon}>🌐</Text>
-          <Text style={styles.emptyTitle}>SuperTrace</Text>
+          <Text style={styles.emptyTitle}>{t('appName')}</Text>
           <Text style={styles.emptySubtitle}>
-            Enter an IP address or domain to start tracing
+            {t('emptyStateSubtitle')}
           </Text>
         </View>
       )}
       {target && (
         <View style={styles.targetBanner}>
-          <Text style={styles.targetLabel}>Tracing to</Text>
+          <Text style={styles.targetLabel}>{t('tracingTo')}</Text>
           <Text style={styles.targetValue}>{target}</Text>
           {status === 'done' && (
             <Text style={styles.targetDone}>
-              ✓ {hops.length} hops
+              {t('hopsCompleted', {count: hops.length})}
             </Text>
           )}
         </View>
@@ -139,7 +143,9 @@ export default function TracerouteScreen() {
     return (
       <View style={styles.loadingFooter}>
         <View style={styles.pulsingDot} />
-        <Text style={styles.loadingText}>Probing hop {hops.length + 1}...</Text>
+        <Text style={styles.loadingText}>
+          {t('probingHop', {hop: hops.length + 1})}
+        </Text>
       </View>
     );
   };
@@ -153,6 +159,7 @@ export default function TracerouteScreen() {
           onStop={stop}
           onToggleMap={handleToggleMap}
           onShowInfo={() => setShowInfo(true)}
+          onShowSettings={() => navigation.navigate('Settings')}
           status={status}
           viewMode={viewMode}
           isResolving={isResolving}
@@ -226,6 +233,7 @@ export default function TracerouteScreen() {
         onStop={stop}
         onToggleMap={handleToggleMap}
         onShowInfo={() => setShowInfo(true)}
+        onShowSettings={() => navigation.navigate('Settings')}
         status={status}
         viewMode={viewMode}
         isResolving={isResolving}

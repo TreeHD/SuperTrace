@@ -54,18 +54,12 @@ export function useTraceroute() {
         cleanupRef.current();
       }
 
-      // Prefill 30 empty placeholder hops so the UI shows the skeleton immediately
-      // This prevents "jumping" when concurrent hops finish out-of-order, or when a hop takes 15s to timeout
-      const placeholders: HopData[] = Array.from({length: 30}, (_, i) => ({
-        hop: i + 1,
-        ip: null,
-        rtt1: null,
-        rtt2: null,
-        rtt3: null,
-        done: false,
-      }));
-      
-      setHops(placeholders);
+      // Start empty — rows are inserted as discover() returns each hop's IP.
+      // Concurrent probes can land out of order, but onHopResult below sorts
+      // by hop number on every insert, so the visible list is always
+      // monotonic. Placeholders made the list flash with 30 empty rows
+      // before any data was real, which felt slower than it was.
+      setHops([]);
       setStatus('running');
       setTarget(host);
       setError(null);

@@ -10,6 +10,7 @@ import {
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
 import {Colors, Spacing, BorderRadius, FontSize, FontFamily, Shadow} from '../theme';
 import {getCountryFlag} from '../services/geoIpService';
+import {useT} from '../i18n';
 import type {HopData} from '../types';
 
 interface HopDetailModalProps {
@@ -25,6 +26,7 @@ export default function HopDetailModal({
   onClose,
   onRetryPing,
 }: HopDetailModalProps) {
+  const t = useT();
   if (!hop) return null;
 
   const flag = hop.geoIp?.country_code
@@ -46,7 +48,7 @@ export default function HopDetailModal({
               <View style={[styles.hopBadge, hop.done && styles.hopBadgeDone]}>
                 <Text style={styles.hopNumber}>{hop.hop}</Text>
               </View>
-              <Text style={styles.title}>Hop Details</Text>
+              <Text style={styles.title}>{t('hopDetails')}</Text>
             </View>
             <TouchableOpacity onPress={onClose} style={styles.closeBtn}>
               <Icon name="close" size={22} color={Colors.textSecondary} />
@@ -59,7 +61,7 @@ export default function HopDetailModal({
             {/* IP */}
             <DetailRow
               icon="ip-network"
-              label="IP Address"
+              label={t('ipAddress')}
               value={hop.ip || '* * *'}
               mono
             />
@@ -68,7 +70,7 @@ export default function HopDetailModal({
             <DetailRow
               icon="dns"
               label="FQDN"
-              value={hop.fqdn || 'N/A'}
+              value={hop.fqdn || t('notAvailable')}
               mono
             />
 
@@ -77,19 +79,19 @@ export default function HopDetailModal({
             {/* Country */}
             <DetailRow
               icon="earth"
-              label="Country"
+              label={t('country')}
               value={
                 hop.geoIp
-                  ? `${flag} ${hop.geoIp.country || 'Unknown'}`
-                  : 'N/A'
+                  ? `${flag} ${hop.geoIp.country || t('notAvailable')}`
+                  : t('notAvailable')
               }
             />
 
             {/* City */}
             <DetailRow
               icon="city"
-              label="City"
-              value={hop.geoIp?.city || 'N/A'}
+              label={t('city')}
+              value={hop.geoIp?.city || t('notAvailable')}
             />
 
             <View style={styles.divider} />
@@ -98,22 +100,22 @@ export default function HopDetailModal({
             <DetailRow
               icon="numeric"
               label="ASN"
-              value={hop.geoIp?.asn ? `AS${hop.geoIp.asn}` : 'N/A'}
+              value={hop.geoIp?.asn ? `AS${hop.geoIp.asn}` : t('notAvailable')}
               mono
             />
 
             {/* ASN Organization */}
             <DetailRow
               icon="office-building"
-              label="ASN Organization"
-              value={hop.geoIp?.asn_organization || 'N/A'}
+              label={t('asnOrganization')}
+              value={hop.geoIp?.asn_organization || t('notAvailable')}
             />
 
             <View style={styles.divider} />
 
             {/* RTT */}
             <View style={styles.rttSection}>
-              <Text style={styles.rttLabel}>Round Trip Time</Text>
+              <Text style={styles.rttLabel}>{t('roundTripTime')}</Text>
               <View style={styles.rttRow}>
                 <RttBadge label="RTT 1" value={hop.rtt1} />
                 <RttBadge label="RTT 2" value={hop.rtt2} />
@@ -129,7 +131,7 @@ export default function HopDetailModal({
               onPress={onRetryPing}
               activeOpacity={0.7}>
               <Icon name="refresh" size={18} color={Colors.white} />
-              <Text style={styles.retryText}>Retry Ping</Text>
+              <Text style={styles.retryText}>{t('retryPing')}</Text>
             </TouchableOpacity>
           )}
         </View>

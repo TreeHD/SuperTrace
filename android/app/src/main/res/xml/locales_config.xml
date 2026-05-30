@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Per-app language picker config (Android 13+).
+  Listing locales here makes the app appear in
+  Settings → System → Languages with its own per-app entry.
+-->
+<locale-config xmlns:android="http://schemas.android.com/apk/res/android">
+    <locale android:name="en"/>
+    <locale android:name="zh-TW"/>
+</locale-config>

@@ -9,6 +9,7 @@ import {
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
 import {Colors, Spacing, BorderRadius, FontSize, FontFamily} from '../theme';
 import {getCountryFlag} from '../services/geoIpService';
+import {useT} from '../i18n';
 import type {HopData} from '../types';
 
 interface HopCardProps {
@@ -18,6 +19,7 @@ interface HopCardProps {
 }
 
 export default function HopCard({hop, onPress, isLast}: HopCardProps) {
+  const t = useT();
   const avgRtt = computeAvgRtt(hop);
   const flag = hop.geoIp?.country_code
     ? getCountryFlag(hop.geoIp.country_code)
@@ -65,7 +67,7 @@ export default function HopCard({hop, onPress, isLast}: HopCardProps) {
                 size="small"
                 color={Colors.accent}
               />
-              <Text style={styles.loadingText}>resolving...</Text>
+              <Text style={styles.loadingText}>{t('resolving')}</Text>
             </View>
           ) : hop.geoIp ? (
             <View style={styles.geoInfo}>
@@ -75,7 +77,7 @@ export default function HopCard({hop, onPress, isLast}: HopCardProps) {
               </Text>
             </View>
           ) : hop.ip ? (
-            <Text style={styles.privateText}>Private / Unknown</Text>
+            <Text style={styles.privateText}>{t('privateOrUnknown')}</Text>
           ) : null}
         </View>
       </View>

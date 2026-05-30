@@ -133,6 +133,10 @@ dependencies {
     // Kotlin Coroutines for TracerouteModule
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
+    // AppCompat is needed for AppCompatDelegate.setApplicationLocales (per-app
+    // language picker on Android 13+, with built-in fallback below).
+    implementation("androidx.appcompat:appcompat:1.7.0")
+
     if (hermesEnabled.toBoolean()) {
         implementation("com.facebook.react:hermes-android")
     } else {

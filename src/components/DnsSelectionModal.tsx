@@ -9,6 +9,7 @@ import {
 } from 'react-native';
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
 import {Colors, Spacing, BorderRadius, FontSize, FontFamily, Shadow} from '../theme';
+import {useT} from '../i18n';
 
 interface DnsSelectionModalProps {
   visible: boolean;
@@ -25,6 +26,7 @@ export default function DnsSelectionModal({
   onSelect,
   onClose,
 }: DnsSelectionModalProps) {
+  const t = useT();
   return (
     <Modal
       visible={visible}
@@ -36,8 +38,10 @@ export default function DnsSelectionModal({
         <View style={styles.modal}>
           <View style={styles.header}>
             <View>
-              <Text style={styles.title}>Multiple IPs Detected</Text>
-              <Text style={styles.subtitle}>{domain} resolves to {ips.length} IPs</Text>
+              <Text style={styles.title}>{t('multipleIpsDetected')}</Text>
+              <Text style={styles.subtitle}>
+                {t('domainResolvesTo', {domain, count: ips.length})}
+              </Text>
             </View>
             <TouchableOpacity onPress={onClose} style={styles.closeBtn}>
               <Icon name="close" size={22} color={Colors.textSecondary} />

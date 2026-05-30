@@ -11,6 +11,7 @@ import {
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
 import {Colors, Spacing, BorderRadius, FontSize, FontFamily, Shadow} from '../theme';
 import {normalizeHost} from '../utils/host';
+import {useT} from '../i18n';
 import type {TracerouteStatus, ViewMode} from '../types';
 
 interface InputBarProps {
@@ -18,6 +19,7 @@ interface InputBarProps {
   onStop: () => void;
   onToggleMap: () => void;
   onShowInfo: () => void;
+  onShowSettings?: () => void;
   status: TracerouteStatus;
   viewMode: ViewMode;
   isResolving?: boolean;
@@ -30,12 +32,14 @@ export default function InputBar({
   onStop,
   onToggleMap,
   onShowInfo,
+  onShowSettings,
   status,
   viewMode,
   isResolving = false,
   history = [],
   clearHistory,
 }: InputBarProps) {
+  const t = useT();
   const [host, setHost] = useState('');
   const [isFocused, setIsFocused] = useState(false);
   const isRunning = status === 'running' || isResolving;
@@ -73,7 +77,7 @@ export default function InputBar({
             onChangeText={setHost}
             onFocus={() => setIsFocused(true)}
             onBlur={() => setTimeout(() => setIsFocused(false), 200)}
-            placeholder="Enter IP or domain (e.g. 8.8.8.8)"
+            placeholder={t('inputPlaceholder')}
             placeholderTextColor={Colors.textMuted}
             autoCapitalize="none"
             autoCorrect={false}
@@ -103,17 +107,17 @@ export default function InputBar({
           {isResolving ? (
             <>
               <ActivityIndicator size="small" color={Colors.white} />
-              <Text style={styles.buttonText}>Resolving...</Text>
+              <Text style={styles.buttonText}>{t('buttonResolving')}</Text>
             </>
           ) : isRunning ? (
             <>
               <ActivityIndicator size="small" color={Colors.white} />
-              <Text style={styles.buttonText}>Stop</Text>
+              <Text style={styles.buttonText}>{t('buttonStop')}</Text>
             </>
           ) : (
             <>
               <Icon name="radar" size={18} color={Colors.white} />
-              <Text style={styles.buttonText}>Trace</Text>
+              <Text style={styles.buttonText}>{t('buttonTrace')}</Text>
             </>
           )}
         </TouchableOpacity>
@@ -142,15 +146,24 @@ export default function InputBar({
             color={Colors.textSecondary}
           />
         </TouchableOpacity>
+
+        {onShowSettings && (
+          <TouchableOpacity
+            style={styles.iconButton}
+            onPress={onShowSettings}
+            activeOpacity={0.7}>
+            <Icon name="cog-outline" size={20} color={Colors.textSecondary} />
+          </TouchableOpacity>
+        )}
       </View>
 
       {/* History Dropdown Overlay */}
       {isFocused && history.length > 0 && !isRunning && (
         <View style={styles.historyContainer}>
           <View style={styles.historyHeader}>
-            <Text style={styles.historyTitle}>Recent Traces</Text>
+            <Text style={styles.historyTitle}>{t('recentTraces')}</Text>
             <TouchableOpacity onPress={clearHistory}>
-              <Text style={styles.historyClear}>Clear</Text>
+              <Text style={styles.historyClear}>{t('clear')}</Text>
             </TouchableOpacity>
           </View>
           {history.map((h, i) => (

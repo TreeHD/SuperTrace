@@ -50,9 +50,10 @@ export interface PingSummary {
 
 export interface SystemDnsInfo {
   servers: string[];
-  transport: string;           // "wifi" | "cellular" | "ethernet" | "vpn" | "other" | "none" | "unknown"
-  privateDnsActive: boolean;   // true if Android Private DNS (DoT) is on
+  transport: string;           // active network's transport
+  privateDnsActive: boolean;
   privateDnsServer: string | null;
+  perTransport: Record<string, string[]>;  // {wifi: [...], cellular: [...], ...}
 }
 
 export interface LocalNetworkInfo {
