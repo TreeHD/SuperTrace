@@ -6,14 +6,17 @@ import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.os.Build
+import android.system.ErrnoException
+import android.system.Os
+import android.system.OsConstants
+import android.system.StructTimeval
 import com.facebook.react.bridge.*
 import com.facebook.react.modules.core.DeviceEventManagerModule
 import kotlinx.coroutines.*
-import java.net.DatagramPacket
-import java.net.DatagramSocket
+import java.io.FileDescriptor
+import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
-import java.net.SocketTimeoutException
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -26,12 +29,18 @@ class TracerouteModule(reactContext: ReactApplicationContext) :
         private const val EVENT_HOP_RESULT = "onHopResult"
         private const val EVENT_TRACE_COMPLETE = "onTraceComplete"
         private const val EVENT_TRACE_ERROR = "onTraceError"
+
+        // Linux uapi/in.h IP_TTL = 2. OsConstants.IP_TTL was only made public
+        // in newer SDKs; the on-wire value has been stable since Linux 1.0,
+        // so hardcoding is safe across every Android release we support.
+        private const val IP_TTL_OPT = 2
     }
 
     override fun getName(): String = NAME
 
     private var tracerouteJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val probeSeq = AtomicInteger(0)
 
     @ReactMethod
     fun startTraceroute(host: String, maxHops: Int, timeoutMs: Int) {
@@ -328,79 +337,16 @@ class TracerouteModule(reactContext: ReactApplicationContext) :
         val result = WritableNativeMap()
         result.putInt("hop", ttl)
 
-        val rttValues = mutableListOf<Double>()
+        val rttValues = DoubleArray(3) { -1.0 }
         var hopIp: String? = null
 
-        // Send 3 probes per hop
+        // 3 probes per hop. Each probe uses a fresh socket pair so we can
+        // parallelise across hops without responses cross-contaminating.
         for (probe in 0 until 3) {
-            try {
-                val socket = DatagramSocket()
-                socket.soTimeout = timeoutMs
-
-                // Set TTL
-                val channel = socket.channel
-                if (channel != null) {
-                    channel.setOption(java.net.StandardSocketOptions.IP_MULTICAST_TTL, ttl)
-                }
-
-                // For DatagramSocket, use connect approach with TTL
-                // We'll use a different approach - use InetAddress.isReachable with TTL
-                val startTime = System.nanoTime()
-
-                try {
-                    // Create a UDP packet to a high port
-                    val port = 33434 + ttl
-                    val data = ByteArray(32) { 0 }
-                    val packet = DatagramPacket(data, data.size, target, port)
-
-                    // We need to set TTL via socket options
-                    val rawSocket = DatagramSocket()
-                    rawSocket.soTimeout = timeoutMs
-
-                    // Use TrafficClass to manipulate - actually on Android
-                    // the best approach is using the socket's underlying impl
-
-                    // Simplified approach: use Process to run ping with TTL
-                    val process = Runtime.getRuntime().exec(
-                        arrayOf("ping", "-c", "1", "-t", ttl.toString(), "-W",
-                            (timeoutMs / 1000).coerceAtLeast(1).toString(),
-                            target.hostAddress)
-                    )
-
-                    val output = process.inputStream.bufferedReader().readText()
-                    val errorOutput = process.errorStream.bufferedReader().readText()
-                    process.waitFor()
-
-                    val endTime = System.nanoTime()
-                    val rtt = (endTime - startTime) / 1_000_000.0
-
-                    // Parse the output to find the responding IP
-                    // Typical output: "From 192.168.1.1 icmp_seq=1 Time to live exceeded"
-                    // Or: "64 bytes from 8.8.8.8: icmp_seq=1 ttl=119 time=5.23 ms"
-                    val fromPattern = Regex("""[Ff]rom\s+([\d.]+|[0-9a-fA-F:]+)""")
-                    val timePattern = Regex("""time[=<]\s*([\d.]+)\s*ms""")
-
-                    val fromMatch = fromPattern.find(output) ?: fromPattern.find(errorOutput)
-                    val timeMatch = timePattern.find(output)
-
-                    if (fromMatch != null) {
-                        hopIp = fromMatch.groupValues[1].removeSuffix(":")
-                        val parsedRtt = timeMatch?.groupValues?.get(1)?.toDoubleOrNull() ?: rtt
-                        rttValues.add(parsedRtt)
-                    } else {
-                        rttValues.add(-1.0) // Timeout
-                    }
-
-                    rawSocket.close()
-                } catch (e: SocketTimeoutException) {
-                    rttValues.add(-1.0)
-                } catch (e: Exception) {
-                    rttValues.add(-1.0)
-                }
-
-                socket.close()
-            } catch (e: Exception) {
-                rttValues.add(-1.0)
+            val (ip, rtt) = sendProbe(target, ttl, timeoutMs)
+            if (ip != null) {
+                hopIp = ip
+                if (rtt != null) rttValues[probe] = rtt
             }
         }
 
@@ -410,19 +356,120 @@ class TracerouteModule(reactContext: ReactApplicationContext) :
             result.putNull("ip")
         }
 
-        // Set RTT values
         for (i in 0 until 3) {
-            val rtt = rttValues.getOrNull(i) ?: -1.0
-            if (rtt >= 0) {
-                result.putDouble("rtt${i + 1}", rtt)
-            } else {
-                result.putNull("rtt${i + 1}")
-            }
+            val rtt = rttValues[i]
+            if (rtt >= 0) result.putDouble("rtt${i + 1}", rtt)
+            else result.putNull("rtt${i + 1}")
         }
 
         result.putBoolean("done", hopIp == target.hostAddress)
-
         return result
+    }
+
+    /**
+     * One traceroute probe: send an ICMP Echo Request with TTL=ttl on an
+     * unprivileged ICMP datagram socket. Linux delivers two kinds of
+     * responses to that socket:
+     *
+     *   - ICMP Time Exceeded (type 11) from a mid-path router whose decrement
+     *     hit 0. The fromAddr on recvfrom is the router's IP — that's the hop.
+     *   - ICMP Echo Reply (type 0) from the destination once TTL is large
+     *     enough to actually arrive. fromAddr is the destination IP.
+     *
+     * Why ICMP and not UDP-with-ICMP-recv: an unprivileged ICMP datagram
+     * socket only demuxes responses that match its own outgoing requests.
+     * UDP-out + ICMP-in (the classic raw-socket traceroute pattern) needs
+     * CAP_NET_RAW, which apps never have on Android.
+     *
+     * Why this works on Android specifically: /proc/sys/net/ipv4/ping_group_range
+     * defaults to "0 2147483647" — every app gid is allowed to open
+     * SOCK_DGRAM+IPPROTO_ICMP. The kernel attaches the socket to the request
+     * via its ID field and routes both Echo Replies AND in-transit
+     * Time Exceeded back to it.
+     *
+     * The previous implementation shelled out to `ping -t <ttl>`, which
+     * silently failed because Android's toybox ping interprets `-t` as
+     * timeout (BSD-style) instead of TTL (iputils-style). Every probe
+     * arrived at the destination with default TTL=64, so traceroute
+     * appeared to terminate at hop 1.
+     */
+    private fun sendProbe(target: InetAddress, ttl: Int, timeoutMs: Int): Pair<String?, Double?> {
+        if (target !is Inet4Address) {
+            // IPv6 traceroute would need IPV6_UNICAST_HOPS + ICMPv6 — out of scope.
+            return Pair(null, null)
+        }
+
+        var fd: FileDescriptor? = null
+        try {
+            fd = Os.socket(OsConstants.AF_INET, OsConstants.SOCK_DGRAM, OsConstants.IPPROTO_ICMP)
+            // OsConstants.IP_TTL was only made public in newer SDKs; the Linux
+            // uapi value (2) has been stable since the kernel's 1.0 days.
+            Os.setsockoptInt(fd, OsConstants.IPPROTO_IP, IP_TTL_OPT, ttl)
+            Os.setsockoptTimeval(
+                fd, OsConstants.SOL_SOCKET, OsConstants.SO_RCVTIMEO,
+                StructTimeval.fromMillis(timeoutMs.toLong())
+            )
+            // The unprivileged ICMP socket is "connected" to a kernel-assigned
+            // ID by binding; without bind, sendto silently drops the packet.
+            Os.bind(fd, InetAddress.getByName("0.0.0.0"), 0)
+
+            // Build a minimal ICMP Echo Request. The kernel rewrites the ID
+            // field to its own assignment regardless of what we put — so we
+            // don't need to track it ourselves. Sequence is up to us.
+            val seq = (ttl shl 8) or (probeSeq.incrementAndGet() and 0xFF)
+            val packet = buildIcmpEcho(seq)
+
+            val startNs = System.nanoTime()
+            Os.sendto(fd, packet, 0, packet.size, 0, target, 0)
+
+            val recvBuf = ByteArray(1500)
+            val srcOut = InetSocketAddress(0)
+            val received = Os.recvfrom(fd, recvBuf, 0, recvBuf.size, 0, srcOut)
+            val rttMs = (System.nanoTime() - startNs) / 1_000_000.0
+
+            if (received <= 0) return Pair(null, null)
+            val srcIp = srcOut.address?.hostAddress ?: return Pair(null, null)
+            return Pair(srcIp, rttMs)
+        } catch (e: ErrnoException) {
+            // EAGAIN / EWOULDBLOCK on recvfrom = SO_RCVTIMEO fired = no
+            // response for this TTL within the budget. That's a normal
+            // "* * *" hop, not an error.
+            return Pair(null, null)
+        } catch (e: Exception) {
+            android.util.Log.w("SuperTrace", "probe ttl=$ttl failed: ${e.message}")
+            return Pair(null, null)
+        } finally {
+            try { fd?.let { Os.close(it) } } catch (_: Exception) {}
+        }
+    }
+
+    /**
+     * Construct an 8-byte ICMP Echo Request header.
+     *   type=8, code=0, checksum, id=0 (kernel rewrites), seq=seq
+     * No payload — the kernel doesn't care and routers don't either.
+     */
+    private fun buildIcmpEcho(seq: Int): ByteArray {
+        val pkt = ByteArray(8)
+        pkt[0] = 8        // type: Echo Request
+        pkt[1] = 0        // code
+        pkt[2] = 0; pkt[3] = 0   // checksum (filled in below)
+        pkt[4] = 0; pkt[5] = 0   // id — kernel overwrites for unprivileged ICMP socket
+        pkt[6] = ((seq shr 8) and 0xFF).toByte()
+        pkt[7] = (seq and 0xFF).toByte()
+
+        // RFC 1071 internet checksum
+        var sum = 0
+        var i = 0
+        while (i < pkt.size - 1) {
+            val word = ((pkt[i].toInt() and 0xFF) shl 8) or (pkt[i + 1].toInt() and 0xFF)
+            sum += word
+            i += 2
+        }
+        while ((sum shr 16) != 0) sum = (sum and 0xFFFF) + (sum shr 16)
+        val checksum = sum.inv() and 0xFFFF
+        pkt[2] = ((checksum shr 8) and 0xFF).toByte()
+        pkt[3] = (checksum and 0xFF).toByte()
+        return pkt
     }
 
     private fun sendHopResult(result: WritableNativeMap) {
