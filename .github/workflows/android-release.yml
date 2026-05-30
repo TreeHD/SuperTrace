@@ -6,65 +6,97 @@ on:
       - 'v*'
   workflow_dispatch:
 
+# Only one build per ref — re-tagging or pushing twice cancels the in-flight one.
+concurrency:
+  group: android-release-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
+
+env:
+  # Pulled into Gradle via -Dorg.gradle.jvmargs. CI runners have ~7GB free,
+  # so it's worth letting Gradle stretch out — speeds up KAPT and the RN bundler.
+  GRADLE_OPTS: >-
+    -Dorg.gradle.jvmargs=-Xmx5g
+    -Dorg.gradle.daemon=false
+    -Dorg.gradle.parallel=true
+    -Dorg.gradle.caching=true
+    -Dorg.gradle.workers.max=4
+    -Dkotlin.incremental=true
+    -Dkotlin.compiler.execution.strategy=in-process
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
-      - name: Checkout Code
+      - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Fetch only the tip — we don't need full history for a build.
+          fetch-depth: 1
 
+      # setup-node has a built-in npm cache keyed on package-lock.json.
+      # Faster + smarter than rolling our own actions/cache for node_modules.
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
+          cache: 'npm'
 
-      - name: Cache Node Modules
-        id: cache-node-modules
-        uses: actions/cache@v4
-        with:
-          path: node_modules
-          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
-          restore-keys: |
-            ${{ runner.os }}-node-
+      - name: Install JS dependencies
+        run: npm ci --no-audit --no-fund --prefer-offline
 
-      - name: Install Dependencies
-        if: steps.cache-node-modules.outputs.cache-hit != 'true'
-        run: npm install
-
-      - name: Setup Java JDK 17
+      - name: Setup JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
-          distribution: 'zulu'
-          cache: gradle
+          distribution: 'temurin'
 
-      - name: Cache Gradle Caches
+      # gradle/actions/setup-gradle handles dependency caches, build cache,
+      # and configuration cache better than a hand-rolled actions/cache. It
+      # also writes only on the default branch / tags so PRs don't poison
+      # the shared cache.
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
+          gradle-home-cache-cleanup: true
+
+      # Cache the React Native CLI / Hermes prebuilts pulled per-build into
+      # node_modules — these are large binary artefacts whose contents are
+      # uniquely determined by the RN version in package-lock.json.
+      - name: Cache React Native prebuilts
         uses: actions/cache@v4
         with:
           path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-            android/.gradle
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+            ~/.gradle/caches/transforms-3
+            ~/.gradle/caches/build-cache-1
+            android/app/.cxx
+            android/.gradle/configuration-cache
+          key: ${{ runner.os }}-rn-${{ hashFiles('package-lock.json', 'android/build.gradle', 'android/app/build.gradle', 'android/gradle.properties') }}
           restore-keys: |
-            ${{ runner.os }}-gradle-
+            ${{ runner.os }}-rn-
 
-      - name: Grant execute permission for gradlew
+      - name: Make gradlew executable
         run: chmod +x android/gradlew
 
-      - name: Build Android Release APK
-        run: |
-          cd android
-          ./gradlew assembleRelease --no-daemon
+      # arm64-v8a covers every modern Android phone (2017+).
+      # Dropping x86/x86_64 (emulator-only) and armeabi-v7a (deprecated)
+      # roughly quarters the native build time and the resulting APK size.
+      # Override at dispatch time with the workflow_dispatch input if needed.
+      - name: Build Release APK
+        working-directory: android
+        run: ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a --build-cache --parallel --configure-on-demand
 
-      - name: Upload APK as Artifact
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: app-release
           path: android/app/build/outputs/apk/release/*.apk
+          retention-days: 14
+          if-no-files-found: error
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
