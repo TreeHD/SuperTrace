@@ -6,4 +6,8 @@ RCT_EXTERN_METHOD(reverseLookup:(NSString *)ip
                   resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(reverseLookupBatch:(NSArray *)ips
+                  resolve:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+
 @end
