@@ -296,22 +296,20 @@ class TracerouteModule: RCTEventEmitter {
     }
 
     private func resolveHost(_ host: String) -> String? {
-        let hostRef = CFHostCreateWithName(nil, host as CFString).takeRetainedValue()
-        var resolved = DarwinBoolean(false)
-        CFHostStartInfoResolution(hostRef, .addresses, nil)
-        guard let addresses = CFHostGetAddressing(hostRef, &resolved)?.takeUnretainedValue() as? [Data],
-              let firstAddress = addresses.first else {
+        var hints = addrinfo()
+        hints.ai_socktype = SOCK_DGRAM
+        var res: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(host, nil, &hints, &res) == 0, let addrInfo = res else {
             return nil
         }
+        defer { freeaddrinfo(res) }
 
         var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-        firstAddress.withUnsafeBytes { ptr in
-            let sockaddr = ptr.bindMemory(to: sockaddr.self).baseAddress!
-            getnameinfo(sockaddr, socklen_t(firstAddress.count),
-                       &hostname, socklen_t(hostname.count),
-                       nil, 0, NI_NUMERICHOST)
+        guard getnameinfo(addrInfo.pointee.ai_addr, addrInfo.pointee.ai_addrlen,
+                         &hostname, socklen_t(hostname.count),
+                         nil, 0, NI_NUMERICHOST) == 0 else {
+            return nil
         }
-
         return String(cString: hostname)
     }
 
@@ -322,8 +320,8 @@ class TracerouteModule: RCTEventEmitter {
         var hopIp: String? = nil
 
         for _ in 0..<3 {
-            // Use socket-based approach with TTL
-            let (ip, rtt) = await traceHop(target: target, ttl: ttl, timeoutMs: timeoutMs)
+            // Use socket-based approach with TTL — pass the resolved IP to avoid re-resolution
+            let (ip, rtt) = await traceHop(target: targetIp, ttl: ttl, timeoutMs: timeoutMs)
 
             if let ip = ip {
                 hopIp = ip
@@ -358,83 +356,149 @@ class TracerouteModule: RCTEventEmitter {
                     if recvSock >= 0 { close(recvSock) }
                 }
 
-                // Create UDP socket for sending
-                sendSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
-                guard sendSock >= 0 else {
+                // Determine address family from target string
+                var isIPv6 = target.contains(":")
+
+                // Try to resolve target to determine address family
+                var hints = addrinfo()
+                hints.ai_socktype = SOCK_DGRAM
+                var res: UnsafeMutablePointer<addrinfo>?
+                let gaiResult = getaddrinfo(target, nil, &hints, &res)
+                guard gaiResult == 0, let addrInfo = res else {
                     continuation.resume(returning: (nil, nil))
                     return
                 }
+                defer { freeaddrinfo(res) }
 
-                // Set TTL
-                var ttlValue = Int32(ttl)
-                setsockopt(sendSock, IPPROTO_IP, IP_TTL, &ttlValue, socklen_t(MemoryLayout<Int32>.size))
+                let family = addrInfo.pointee.ai_family
+                isIPv6 = (family == AF_INET6)
 
-                // Create ICMP socket for receiving
-                recvSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP)
-                guard recvSock >= 0 else {
-                    continuation.resume(returning: (nil, nil))
-                    return
-                }
-
-                // Set timeout
-                var timeout = timeval()
-                timeout.tv_sec = __darwin_time_t(timeoutMs / 1000)
-                timeout.tv_usec = Int32((timeoutMs % 1000) * 1000)
-                setsockopt(recvSock, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
-
-                // Resolve target
-                var targetAddr = sockaddr_in()
-                targetAddr.sin_family = sa_family_t(AF_INET)
-                targetAddr.sin_port = UInt16(33434 + ttl).bigEndian
-                inet_pton(AF_INET, target, &targetAddr.sin_addr)
-
-                // If target is a hostname, resolve it
-                if targetAddr.sin_addr.s_addr == 0 {
-                    guard let hostEntry = gethostbyname(target) else {
+                if isIPv6 {
+                    // IPv6 path
+                    sendSock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP)
+                    guard sendSock >= 0 else {
                         continuation.resume(returning: (nil, nil))
                         return
                     }
-                    memcpy(&targetAddr.sin_addr, hostEntry.pointee.h_addr_list[0],
-                           Int(hostEntry.pointee.h_length))
-                }
 
-                let startTime = CFAbsoluteTimeGetCurrent()
+                    var ttlValue = Int32(ttl)
+                    setsockopt(sendSock, IPPROTO_IPV6, IPV6_UNICAST_HOPS, &ttlValue, socklen_t(MemoryLayout<Int32>.size))
 
-                // Send UDP packet
-                let data = [UInt8](repeating: 0, count: 32)
-                let sendResult = withUnsafePointer(to: &targetAddr) { ptr in
-                    ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
-                        sendto(sendSock, data, data.count, 0, sockaddrPtr,
-                               socklen_t(MemoryLayout<sockaddr_in>.size))
+                    recvSock = socket(AF_INET6, SOCK_DGRAM, 58) // IPPROTO_ICMPV6
+                    guard recvSock >= 0 else {
+                        continuation.resume(returning: (nil, nil))
+                        return
                     }
-                }
 
-                guard sendResult >= 0 else {
-                    continuation.resume(returning: (nil, nil))
-                    return
-                }
+                    var timeout = timeval()
+                    timeout.tv_sec = __darwin_time_t(timeoutMs / 1000)
+                    timeout.tv_usec = Int32((timeoutMs % 1000) * 1000)
+                    setsockopt(recvSock, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
 
-                // Receive ICMP response
-                var recvBuffer = [UInt8](repeating: 0, count: 1024)
-                var fromAddr = sockaddr_in()
-                var fromLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+                    // Build target sockaddr_in6 from resolved address
+                    var targetAddr = sockaddr_in6()
+                    memcpy(&targetAddr, addrInfo.pointee.ai_addr, Int(addrInfo.pointee.ai_addrlen))
+                    targetAddr.sin6_port = UInt16(33434 + ttl).bigEndian
 
-                let recvResult = withUnsafeMutablePointer(to: &fromAddr) { ptr in
-                    ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
-                        recvfrom(recvSock, &recvBuffer, recvBuffer.count, 0, sockaddrPtr, &fromLen)
+                    let startTime = CFAbsoluteTimeGetCurrent()
+
+                    let data = [UInt8](repeating: 0, count: 32)
+                    let sendResult = withUnsafePointer(to: &targetAddr) { ptr in
+                        ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                            sendto(sendSock, data, data.count, 0, sockaddrPtr,
+                                   socklen_t(MemoryLayout<sockaddr_in6>.size))
+                        }
                     }
-                }
 
-                let endTime = CFAbsoluteTimeGetCurrent()
-                let rtt = (endTime - startTime) * 1000 // Convert to ms
+                    guard sendResult >= 0 else {
+                        continuation.resume(returning: (nil, nil))
+                        return
+                    }
 
-                if recvResult > 0 {
-                    var ipStr = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
-                    inet_ntop(AF_INET, &fromAddr.sin_addr, &ipStr, socklen_t(INET_ADDRSTRLEN))
-                    let ip = String(cString: ipStr)
-                    continuation.resume(returning: (ip, rtt))
+                    var recvBuffer = [UInt8](repeating: 0, count: 1024)
+                    var fromAddr = sockaddr_in6()
+                    var fromLen = socklen_t(MemoryLayout<sockaddr_in6>.size)
+
+                    let recvResult = withUnsafeMutablePointer(to: &fromAddr) { ptr in
+                        ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                            recvfrom(recvSock, &recvBuffer, recvBuffer.count, 0, sockaddrPtr, &fromLen)
+                        }
+                    }
+
+                    let endTime = CFAbsoluteTimeGetCurrent()
+                    let rtt = (endTime - startTime) * 1000
+
+                    if recvResult > 0 {
+                        var ipStr = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+                        inet_ntop(AF_INET6, &fromAddr.sin6_addr, &ipStr, socklen_t(INET6_ADDRSTRLEN))
+                        let ip = String(cString: ipStr)
+                        continuation.resume(returning: (ip, rtt))
+                    } else {
+                        continuation.resume(returning: (nil, nil))
+                    }
                 } else {
-                    continuation.resume(returning: (nil, nil))
+                    // IPv4 path (original)
+                    sendSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
+                    guard sendSock >= 0 else {
+                        continuation.resume(returning: (nil, nil))
+                        return
+                    }
+
+                    var ttlValue = Int32(ttl)
+                    setsockopt(sendSock, IPPROTO_IP, IP_TTL, &ttlValue, socklen_t(MemoryLayout<Int32>.size))
+
+                    recvSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP)
+                    guard recvSock >= 0 else {
+                        continuation.resume(returning: (nil, nil))
+                        return
+                    }
+
+                    var timeout = timeval()
+                    timeout.tv_sec = __darwin_time_t(timeoutMs / 1000)
+                    timeout.tv_usec = Int32((timeoutMs % 1000) * 1000)
+                    setsockopt(recvSock, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+
+                    // Build target sockaddr_in from resolved address
+                    var targetAddr = sockaddr_in()
+                    memcpy(&targetAddr, addrInfo.pointee.ai_addr, Int(addrInfo.pointee.ai_addrlen))
+                    targetAddr.sin_port = UInt16(33434 + ttl).bigEndian
+
+                    let startTime = CFAbsoluteTimeGetCurrent()
+
+                    let data = [UInt8](repeating: 0, count: 32)
+                    let sendResult = withUnsafePointer(to: &targetAddr) { ptr in
+                        ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                            sendto(sendSock, data, data.count, 0, sockaddrPtr,
+                                   socklen_t(MemoryLayout<sockaddr_in>.size))
+                        }
+                    }
+
+                    guard sendResult >= 0 else {
+                        continuation.resume(returning: (nil, nil))
+                        return
+                    }
+
+                    var recvBuffer = [UInt8](repeating: 0, count: 1024)
+                    var fromAddr = sockaddr_in()
+                    var fromLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+
+                    let recvResult = withUnsafeMutablePointer(to: &fromAddr) { ptr in
+                        ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                            recvfrom(recvSock, &recvBuffer, recvBuffer.count, 0, sockaddrPtr, &fromLen)
+                        }
+                    }
+
+                    let endTime = CFAbsoluteTimeGetCurrent()
+                    let rtt = (endTime - startTime) * 1000
+
+                    if recvResult > 0 {
+                        var ipStr = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+                        inet_ntop(AF_INET, &fromAddr.sin_addr, &ipStr, socklen_t(INET_ADDRSTRLEN))
+                        let ip = String(cString: ipStr)
+                        continuation.resume(returning: (ip, rtt))
+                    } else {
+                        continuation.resume(returning: (nil, nil))
+                    }
                 }
             }
         }
@@ -458,18 +522,17 @@ class TracerouteModule: RCTEventEmitter {
     private func tcpCheck(host: String, timeoutMs: Int) async -> Bool {
         return await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
-                guard let hostEntry = gethostbyname(host) else {
+                var hints = addrinfo()
+                hints.ai_socktype = SOCK_STREAM
+                var res: UnsafeMutablePointer<addrinfo>?
+                guard getaddrinfo(host, "80", &hints, &res) == 0, let addrInfo = res else {
                     continuation.resume(returning: false)
                     return
                 }
+                defer { freeaddrinfo(res) }
 
-                var addr = sockaddr_in()
-                addr.sin_family = sa_family_t(AF_INET)
-                addr.sin_port = UInt16(80).bigEndian
-                memcpy(&addr.sin_addr, hostEntry.pointee.h_addr_list[0],
-                       Int(hostEntry.pointee.h_length))
-
-                let sock = socket(AF_INET, SOCK_STREAM, 0)
+                let family = addrInfo.pointee.ai_family
+                let sock = socket(family, SOCK_STREAM, 0)
                 guard sock >= 0 else {
                     continuation.resume(returning: false)
                     return
@@ -481,11 +544,7 @@ class TracerouteModule: RCTEventEmitter {
                 timeout.tv_usec = Int32((timeoutMs % 1000) * 1000)
                 setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
 
-                let connectResult = withUnsafePointer(to: &addr) { ptr in
-                    ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
-                        connect(sock, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
-                    }
-                }
+                let connectResult = connect(sock, addrInfo.pointee.ai_addr, addrInfo.pointee.ai_addrlen)
                 continuation.resume(returning: connectResult == 0)
             }
         }

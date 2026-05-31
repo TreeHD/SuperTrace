@@ -27,10 +27,10 @@ class TracerouteModule(reactContext: ReactApplicationContext) :
         private const val EVENT_TRACE_ERROR = "onTraceError"
         private const val TAG = "SuperTraceTraceroute"
 
-        // IPv4 dotted quad after a "from" keyword. Matches both
-        // "From X.X.X.X icmp_seq=N Time to live exceeded" (mid-path)
-        // and "64 bytes from X.X.X.X:" (destination Echo Reply).
-        private val FROM_PATTERN = Regex("""[Ff]rom\s+([0-9]{1,3}(?:\.[0-9]{1,3}){3})""")
+        // IPv4 dotted quad after a "from" keyword.
+        private val FROM_PATTERN_V4 = Regex("""[Ff]rom\s+([0-9]{1,3}(?:\.[0-9]{1,3}){3})""")
+        // IPv6 address after a "from" keyword (e.g. "From 2001:db8::1" or "from 2001:db8::1:")
+        private val FROM_PATTERN_V6 = Regex("""[Ff]rom\s+([0-9a-fA-F:]+(?::[0-9a-fA-F]+)+)""")
         // Round-trip time on Echo Reply lines.
         private val RTT_PATTERN = Regex("""time[=<]\s*([\d.]+)\s*ms""")
     }
@@ -377,19 +377,28 @@ class TracerouteModule(reactContext: ReactApplicationContext) :
                     try {
                         withTimeout(timeoutMs.toLong() + 2000) {
                             val startTime = System.nanoTime()
-                            
-                            val commandPool = listOf(
-                                arrayOf("ping", "-c", "1", "-W", "1", targetAddress.hostAddress),
-                                arrayOf("/system/bin/ping", "-c", "1", "-W", "2", targetAddress.hostAddress),
-                                arrayOf("ping", "-c", "1", "-w", "1", targetAddress.hostAddress)
-                            )
+                            val ip = targetAddress.hostAddress ?: ""
+
+                            val commandPool = if (isIPv6(targetAddress)) {
+                                listOf(
+                                    arrayOf("ping6", "-c", "1", "-W", "1", ip),
+                                    arrayOf("/system/bin/ping6", "-c", "1", "-W", "2", ip),
+                                    arrayOf("ping", "-6", "-c", "1", "-W", "1", ip)
+                                )
+                            } else {
+                                listOf(
+                                    arrayOf("ping", "-c", "1", "-W", "1", ip),
+                                    arrayOf("/system/bin/ping", "-c", "1", "-W", "2", ip),
+                                    arrayOf("ping", "-c", "1", "-w", "1", ip)
+                                )
+                            }
 
                             for (cmd in commandPool) {
                                 try {
                                     val proc = ProcessBuilder(*cmd).redirectErrorStream(true).start()
                                     val out = proc.inputStream.bufferedReader().readText()
                                     proc.waitFor()
-                                    
+
                                     val match = Regex("""time[=<]\s*([\d.]+)""").find(out)
                                     if (match != null) {
                                         rttValue = match.groupValues[1].toDoubleOrNull()
@@ -400,7 +409,7 @@ class TracerouteModule(reactContext: ReactApplicationContext) :
                                     outputString = "Error: ${e.message}"
                                 }
                             }
-                            
+
                             // Fallback to isReachable
                             if (rttValue == null) {
                                 android.util.Log.d("SuperTrace", "Native ping failed, using isReachable")
@@ -511,9 +520,13 @@ class TracerouteModule(reactContext: ReactApplicationContext) :
         return result
     }
 
+    private fun isIPv6(address: InetAddress): Boolean {
+        return address is java.net.Inet6Address
+    }
+
     /**
-     * Discovery probe — fire `ping -c 1 -t TTL <target>` and parse the
-     * "From X.X.X.X" line to identify the router at this TTL.
+     * Discovery probe — fire `ping -c 1 -t TTL <target>` (or ping6 for IPv6)
+     * and parse the "From X" line to identify the router at this TTL.
      *
      * Single probe (-c 1) is intentional: discovery only needs the hop IP,
      * not timing. Going to -c 3 here was costing ~3× wall-clock per hop
@@ -531,11 +544,23 @@ class TracerouteModule(reactContext: ReactApplicationContext) :
     ): Triple<String?, List<Double?>, Boolean> {
         val timeoutSec = (timeoutMs / 1000).coerceAtLeast(1).toString()
         val targetIp = target.hostAddress ?: return Triple(null, emptyList(), false)
+        val isV6 = isIPv6(target)
 
-        val variants = listOf(
-            arrayOf("ping", "-c", "1", "-t", ttl.toString(), "-W", timeoutSec, targetIp),
-            arrayOf("/system/bin/ping", "-c", "1", "-t", ttl.toString(), "-W", timeoutSec, targetIp)
-        )
+        val variants = if (isV6) {
+            listOf(
+                arrayOf("ping6", "-c", "1", "-t", ttl.toString(), "-W", timeoutSec, targetIp),
+                arrayOf("ping6", "-c", "1", "-h", ttl.toString(), "-W", timeoutSec, targetIp),
+                arrayOf("/system/bin/ping6", "-c", "1", "-t", ttl.toString(), "-W", timeoutSec, targetIp),
+                arrayOf("ping", "-6", "-c", "1", "-t", ttl.toString(), "-W", timeoutSec, targetIp)
+            )
+        } else {
+            listOf(
+                arrayOf("ping", "-c", "1", "-t", ttl.toString(), "-W", timeoutSec, targetIp),
+                arrayOf("/system/bin/ping", "-c", "1", "-t", ttl.toString(), "-W", timeoutSec, targetIp)
+            )
+        }
+
+        val fromPattern = if (isV6) FROM_PATTERN_V6 else FROM_PATTERN_V4
 
         for (cmd in variants) {
             try {
@@ -545,7 +570,7 @@ class TracerouteModule(reactContext: ReactApplicationContext) :
                 if (!finished) proc.destroyForcibly()
 
                 if (output.isEmpty()) continue
-                val firstFrom = FROM_PATTERN.find(output) ?: continue
+                val firstFrom = fromPattern.find(output) ?: continue
                 val ip = firstFrom.groupValues[1]
                 val parsedRtts = RTT_PATTERN.findAll(output)
                     .mapNotNull { it.groupValues[1].toDoubleOrNull() }
@@ -582,18 +607,25 @@ class TracerouteModule(reactContext: ReactApplicationContext) :
         onProbe: (idx: Int, rttMs: Double?) -> Unit
     ) {
         val timeoutSec = (timeoutMs / 1000).coerceAtLeast(1).toString()
-        val variants = listOf(
-            arrayOf("ping", "-c", "3", "-i", "0.2", "-W", timeoutSec, hopIp),
-            arrayOf("/system/bin/ping", "-c", "3", "-i", "0.2", "-W", timeoutSec, hopIp)
-        )
+        val isV6 = hopIp.contains(':')
+
+        val variants = if (isV6) {
+            listOf(
+                arrayOf("ping6", "-c", "3", "-i", "0.2", "-W", timeoutSec, hopIp),
+                arrayOf("/system/bin/ping6", "-c", "3", "-i", "0.2", "-W", timeoutSec, hopIp),
+                arrayOf("ping", "-6", "-c", "3", "-i", "0.2", "-W", timeoutSec, hopIp)
+            )
+        } else {
+            listOf(
+                arrayOf("ping", "-c", "3", "-i", "0.2", "-W", timeoutSec, hopIp),
+                arrayOf("/system/bin/ping", "-c", "3", "-i", "0.2", "-W", timeoutSec, hopIp)
+            )
+        }
 
         for (cmd in variants) {
             try {
                 val proc = ProcessBuilder(*cmd).redirectErrorStream(true).start()
                 var emitted = 0
-                // Read line-by-line so we surface RTTs as ping prints them,
-                // not in a single batch at the end. ping's stdout flushes
-                // per-line by default.
                 proc.inputStream.bufferedReader().use { reader ->
                     while (true) {
                         val line = reader.readLine() ?: break
@@ -610,8 +642,6 @@ class TracerouteModule(reactContext: ReactApplicationContext) :
                 val finished = proc.waitFor(timeoutMs.toLong() * 3 + 3000, TimeUnit.MILLISECONDS)
                 if (!finished) proc.destroyForcibly()
 
-                // Fill remaining slots with null so the caller knows those
-                // probes never answered (e.g. flaky link, partial response).
                 while (emitted < 3) {
                     onProbe(emitted, null)
                     emitted++
@@ -624,8 +654,6 @@ class TracerouteModule(reactContext: ReactApplicationContext) :
                 continue
             }
         }
-        // No variant worked at all — emit three nulls so the caller's
-        // accounting stays consistent.
         for (i in 0 until 3) onProbe(i, null)
     }
 
